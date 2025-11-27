@@ -1,0 +1,36 @@
+# Global configuration for kite-algo-bot
+# Switch analysis timeframe, run mode (simulation vs live), choose stock universe and strategy.
+
+# Timeframe for candle data: one of [day, 5minute, 15minute]
+timeframe: 5minute
+
+# Run mode: simulate uses historical data / dry-run orders; live uses websocket ticker and live orders if dry_run=false
+mode: simulate   # one of [simulate, live]
+
+# Strategy to use. Implemented: momentum. Planned: range, rsi
+strategy: momentum
+
+# Stock universe list name defined in tools/NiftySymbol.py (e.g., mystocks, allstocks, fno_stocks, nifty500, NiftyMidcap100)
+universe_list: allstocks
+
+# Strategy parameters (defaults applied if omitted)
+strategy_params:
+  fast_sma: 20
+  slow_sma: 50
+  atr_period: 14
+  atr_multiplier: 2.0
+  risk_pct: 0.10
+  max_trade_pct: 0.10
+  partial_targets: [0.2, 0.5]
+  strength_threshold: 0.5
+
+# Capital to allocate per scan/run
+capital: 100000.0
+
+# Dry-run flag to prevent real orders even in live mode
+dry_run: true
+
+# Paths
+csv_dir: Csvs
+instruments_csv: Csvs/instruments.csv
+

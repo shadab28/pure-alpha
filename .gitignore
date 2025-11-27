@@ -1,0 +1,59 @@
+
+# Credentials and tokens
+token.txt
+.env
+credentials.json
+secrets.yml
+cred.ini
+live_quotes.json
+.env.local
+.env.*.local
+.cache
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+env/
+
+# Kite / API key files
+*.key
+*.pem
+
+# csv files
+*.csv
+# Python artifacts
+__pycache__/
+*.py[cod]
+
+# macOS
+.DS_Store
+
+# VS Code
+.vscode/
+
+# Local virtual environments
+.venv/
+env/
+venv/
+
+# Temp and log files
+*.log
+*.tmp
+temp.py
+
+# IDE / editor
+.idea/
+*.sublime-workspace
+
+# Ignore token file that may contain secrets
+token.txt
+
+# Python distribution/build
+build/
+dist/
+*.egg-info/
+
+# Coverage and test artifacts
+.coverage
+htmlcov/
+

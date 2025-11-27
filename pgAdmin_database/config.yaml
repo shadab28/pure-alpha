@@ -1,0 +1,8 @@
+database:
+  host: "127.0.0.1"
+  port: 5432
+  db_name: "postgres"
+  schema_paper: "public"
+  schema_live: "live"
+  username: "postgres"
+  password: "Goodmorning@123"
