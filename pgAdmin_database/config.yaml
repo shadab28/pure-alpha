@@ -1,7 +1,7 @@
 database:
   host: "127.0.0.1"
   port: 5432
-  db_name: "postgres"
+  db_name: "postgres"  # updated from "Local Postgres" to valid identifier
   schema_paper: "public"
   schema_live: "live"
   username: "postgres"

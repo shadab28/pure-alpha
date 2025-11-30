@@ -2,7 +2,7 @@
 # Switch analysis timeframe, run mode (simulation vs live), choose stock universe and strategy.
 
 # Timeframe for candle data: one of [day, 5minute, 15minute]
-timeframe: 5minute
+timeframe: 15minute
 
 # Run mode: simulate uses historical data / dry-run orders; live uses websocket ticker and live orders if dry_run=false
 mode: simulate   # one of [simulate, live]
