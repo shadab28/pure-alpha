@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>LTP Dashboard</title>
+    <style>
+      body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif; margin: 24px; }
+      h1 { font-size: 20px; margin-bottom: 12px; }
+      table { border-collapse: collapse; width: 100%; }
+      th, td { border: 1px solid #ddd; padding: 8px; font-size: 14px; }
+      th { background: #f6f8fa; text-align: left; }
+      tr:nth-child(even) { background: #fafafa; }
+      .muted { color: #555; }
+      .btn-row { margin-bottom: 12px; }
+      button { padding: 6px 12px; margin-right: 6px; cursor: pointer; }
+    </style>
+  </head>
+  <body>
+    <h1>LTP Dashboard <span id="meta" class="muted"></span></h1>
+    <div class="btn-row">
+      <button onclick="downloadCSV()">Download CSV</button>
+      <button onclick="manualRefresh()">Refresh Now</button>
+    </div>
+    <div id="error" style="color:#b00020; margin-bottom:8px;"></div>
+    <table id="ltp-table">
+      <thead>
+        <tr>
+          <th data-key="symbol">Symbol</th>
+          <th data-key="last_price">Last Price</th>
+          <th data-key="last_close">Last Close (15m)</th>
+          <th data-key="ratio_15m_50_200">15m 50/200 Ratio</th>
+          <th data-key="pct_vs_15m_sma200">% vs 15m SMA200</th>
+          <th data-key="pct_vs_daily_sma50">% vs Daily SMA50</th>
+          <th data-key="daily_ratio_50_200">Daily 50/200 Ratio</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+    <script>
+      async function fetchLTP() {
+        const err = document.getElementById('error');
+        err.textContent = '';
+        try {
+          const res = await fetch('/api/ltp');
+          const json = await res.json();
+          if (!res.ok) throw new Error(json.error || 'Failed to fetch LTP');
+          const tbody = document.querySelector('#ltp-table tbody');
+          tbody.innerHTML = '';
+          const data = json.data || {};
+          const universe = json.universe;
+          const meta = document.getElementById('meta');
+          meta.textContent = `(${universe}, ${Object.keys(data).length} symbols)`;
+          const symbols = Object.keys(data).sort();
+          const rows = symbols.map(s => {
+            const d = data[s] || {};
+            const lp = d.last_price;
+            const lc = d.last_close;
+            const pct = (typeof lp === 'number' && typeof lc === 'number' && lc) ? ((lp - lc) / lc * 100) : null;
+            return {
+              symbol: s,
+              last_price: lp,
+              last_close: lc,
+              pct_change: pct,
+              sma200_15m: d.sma200_15m, // hidden
+              sma50_15m: d.sma50_15m,   // hidden
+              ratio_15m_50_200: d.ratio_15m_50_200,
+              pct_vs_15m_sma200: d.pct_vs_15m_sma200,
+              pct_vs_daily_sma50: d.pct_vs_daily_sma50,
+              daily_sma50: d.daily_sma50,   // hidden
+              daily_sma200: d.daily_sma200, // hidden
+              daily_ratio_50_200: d.daily_ratio_50_200
+            };
+          });
+          applySort(rows);
+          tbody.innerHTML = '';
+          for (const r of rows) {
+            const tr = document.createElement('tr');
+            tr.innerHTML = `
+              <td>${r.symbol}</td>
+              <td>${fmtNum(r.last_price)}</td>
+              <td>${fmtNum(r.last_close)}</td>
+              <td>${r.ratio_15m_50_200 != null ? r.ratio_15m_50_200.toFixed(2) : ''}</td>
+              <td>${r.pct_vs_15m_sma200 != null ? r.pct_vs_15m_sma200.toFixed(2) + '%' : ''}</td>
+              <td>${r.pct_vs_daily_sma50 != null ? r.pct_vs_daily_sma50.toFixed(2) + '%' : ''}</td>
+              <td>${r.daily_ratio_50_200 != null ? r.daily_ratio_50_200.toFixed(2) : ''}</td>
+            `;
+            tbody.appendChild(tr);
+          }
+        } catch (e) {
+          err.textContent = e.message;
+        }
+      }
+      function fmtNum(v){ return (typeof v === 'number' && !isNaN(v)) ? v.toFixed(2) : ''; }
+      let sortState = { key: 'symbol', dir: 'asc' };
+      function applySort(arr){
+        const { key, dir } = sortState;
+        arr.sort((a,b)=>{
+          const va = a[key];
+          const vb = b[key];
+          if (va == null && vb == null) return 0;
+          if (va == null) return 1;
+          if (vb == null) return -1;
+          if (typeof va === 'number' && typeof vb === 'number') return dir==='asc'? va - vb : vb - va;
+          return dir==='asc'? String(va).localeCompare(String(vb)) : String(vb).localeCompare(String(va));
+        });
+      }
+      function attachSorting(){
+        const ths = document.querySelectorAll('th[data-key]');
+        ths.forEach(th=>{
+          th.style.cursor='pointer';
+          th.addEventListener('click', ()=>{
+            const key = th.getAttribute('data-key');
+            if (sortState.key === key){
+              sortState.dir = sortState.dir === 'asc' ? 'desc' : 'asc';
+            } else {
+              sortState.key = key; sortState.dir = 'asc';
+            }
+            fetchLTP();
+          });
+        });
+      }
+      attachSorting();
+      function manualRefresh(){ fetchLTP(); }
+      function downloadCSV(){ window.location = '/export/ltp.csv'; }
+      fetchLTP();
+      setInterval(fetchLTP, 5000);
+    </script>
+  </body>
+</html>

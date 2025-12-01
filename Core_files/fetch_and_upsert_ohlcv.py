@@ -13,6 +13,7 @@ Example:
   PYTHONPATH=. python Core_files/fetch_and_upsert_ohlcv.py --days 200
 """
 import os
+import sys
 import json
 import time
 from datetime import datetime, timedelta
@@ -22,14 +23,68 @@ import threading
 
 import yaml
 
+# Ensure repository root is on sys.path so top-level packages import
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+
 from pgAdmin_database.db_connection import pg_cursor
 
 from kiteconnect import KiteConnect
 
 
+def load_local_env():
+    """Load KEY=VALUE pairs from .env files into os.environ if not already set.
+
+    Searches Core_files/.env and repo_root/.env.
+    """
+    here = os.path.dirname(__file__)
+    candidates = [
+        os.path.join(here, '.env'),
+        os.path.join(os.path.dirname(here), '.env'),
+    ]
+    for path in candidates:
+        if not os.path.exists(path):
+            continue
+        try:
+            with open(path, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith('#') or '=' not in line:
+                        continue
+                    k, v = line.split('=', 1)
+                    k = k.strip()
+                    v = v.strip().strip('"').strip("'")
+                    os.environ.setdefault(k, v)
+        except Exception:
+            # best-effort only
+            pass
+
+
 def load_token(path):
-    with open(path) as f:
-        return json.load(f)
+    """Load credentials from token file.
+
+    Supports two formats:
+    - JSON dict: {"api_key": "...", "access_token": "..."}
+    - Plain text: a single-line access token string
+    Returns a dict with at least 'access_token'.
+    """
+    try:
+        with open(path, "r") as f:
+            raw = f.read().strip()
+    except FileNotFoundError:
+        return {}
+    if not raw:
+        return {}
+    # Try JSON first
+    try:
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+    # Fallback: treat the whole file as the access token
+    return {"access_token": raw}
 
 
 def load_params(path):
@@ -148,6 +203,8 @@ def upsert_rows(cur, rows, symbol, timeframe):
 
 
 def main():
+    # Load environment variables from local .env files early
+    load_local_env()
     parser = argparse.ArgumentParser()
     parser.add_argument('--days', type=int, default=200)
     parser.add_argument('--rows', type=int, default=None, help='Approx number of rows per symbol to fetch (overrides --days if set)')
@@ -190,14 +247,24 @@ def main():
     kite_timeframes = [p[1] for p in pairs]
 
     token = load_token(token_path)
-    api_key = token.get('api_key')
-    access_token = token.get('access_token')
-    if not api_key or not access_token:
-        print('Missing api_key or access_token in token.txt')
+    api_key = token.get('api_key') or os.getenv('KITE_API_KEY') or os.getenv('KITE_APIKEY')
+    access_token = token.get('access_token') or os.getenv('KITE_ACCESS_TOKEN')
+    if not access_token:
+        print('Missing access_token. Put it in Core_files/token.txt (plain text or JSON) or set KITE_ACCESS_TOKEN env.')
+        return
+    if not api_key:
+        print('Missing api_key. Provide in token.txt as JSON {"api_key": "...", "access_token": "..."} or set KITE_API_KEY env.')
         return
 
     kite = KiteConnect(api_key=api_key)
     kite.set_access_token(access_token)
+    # Early validation to fail fast on invalid/expired tokens
+    try:
+        _ = kite.profile()
+    except Exception as e:
+        print('Kite access token validation failed:', e)
+        print('Tip: Run "python Core_files/auth.py" to obtain a fresh token and save it to Core_files/token.txt')
+        return
 
     mod = load_nifty_module()
     symbols = getattr(mod, universe_name, None)
@@ -293,7 +360,8 @@ def main():
         return f'Upserted {len(final)} rows for {s} ({",".join(timeframe_labels)})'
 
     # Run ThreadPoolExecutor over symbols
-    workers = max(1, min(args.workers, len(symbols)))
+    # Force worker threads to 4 regardless of CLI
+    workers = min(4, len(symbols))
     print(f'Starting {workers} worker threads for {len(symbols)} symbols')
     results = []
     with ThreadPoolExecutor(max_workers=workers) as ex:

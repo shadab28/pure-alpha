@@ -1,0 +1,60 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Run LTP webapp",
+			"type": "shell",
+			"command": "python -m flask --app Webapp/app.py run --host 0.0.0.0 --port 5000",
+			"args": [],
+			"isBackground": true,
+			"problemMatcher": [
+				"$python"
+			],
+			"group": "build"
+		},
+		{
+			"label": "Run LTP webapp (python3)",
+			"type": "shell",
+			"command": "python3 -m flask --app Webapp/app.py run --host 0.0.0.0 --port 5000",
+			"args": [],
+			"isBackground": true,
+			"problemMatcher": [
+				"$python"
+			],
+			"group": "build"
+		},
+		{
+			"label": "Run LTP webapp (port 5050)",
+			"type": "shell",
+			"command": "python3 -m flask --app Webapp/app.py run --host 0.0.0.0 --port 5050",
+			"args": [],
+			"isBackground": true,
+			"problemMatcher": [
+				"$python"
+			],
+			"group": "build"
+		},
+		{
+			"label": "Start web app (5050)",
+			"type": "shell",
+			"command": "python3 -m flask --app Webapp/app.py run --host 0.0.0.0 --port 5050",
+			"args": [],
+			"isBackground": true,
+			"problemMatcher": [
+				"$python"
+			],
+			"group": "build"
+		},
+		{
+			"label": "Start web app (5050)",
+			"type": "shell",
+			"command": "python3 -m flask --app Webapp/app.py run --host 0.0.0.0 --port 5050",
+			"args": [],
+			"isBackground": true,
+			"problemMatcher": [
+				"$python"
+			],
+			"group": "build"
+		}
+	]
+}
