@@ -52,10 +52,10 @@ def index():
 def export_ltp_csv():
 	try:
 		data = fetch_ltp()
-		rows = ["symbol,last_price,last_close_15m,sma200_15m,sma50_15m,ratio_15m_50_200,pct_vs_15m_sma200,pct_vs_daily_sma50,daily_sma50,daily_sma200,daily_ratio_50_200"]
+		rows = ["symbol,last_price,last_close_15m,sma200_15m,sma50_15m,ratio_15m_50_200,rank_gm,pct_vs_15m_sma200,pct_vs_daily_sma50,daily_sma50,daily_sma200,daily_ratio_50_200"]
 		for sym, info in data.get("data", {}).items():
 			rows.append(
-				f"{sym},{info.get('last_price','')},{info.get('last_close','')},{info.get('sma200_15m','')},{info.get('sma50_15m','')},{info.get('ratio_15m_50_200','')},{info.get('pct_vs_15m_sma200','')},{info.get('pct_vs_daily_sma50','')},{info.get('daily_sma50','')},{info.get('daily_sma200','')},{info.get('daily_ratio_50_200','')}"
+				f"{sym},{info.get('last_price','')},{info.get('last_close','')},{info.get('sma200_15m','')},{info.get('sma50_15m','')},{info.get('ratio_15m_50_200','')},{info.get('rank_gm','')},{info.get('pct_vs_15m_sma200','')},{info.get('pct_vs_daily_sma50','')},{info.get('daily_sma50','')},{info.get('daily_sma200','')},{info.get('daily_ratio_50_200','')}"
 			)
 		csv_content = "\n".join(rows) + "\n"
 		return Response(csv_content, mimetype="text/csv", headers={

@@ -297,6 +297,18 @@ def fetch_ltp() -> Dict[str, Any]:
         daily_sma50_val = daily.get("sma50")
         if isinstance(last_price, (int, float)) and isinstance(daily_sma50_val, (int, float)) and daily_sma50_val:
             pct_vs_daily_sma50 = round((last_price - daily_sma50_val) / daily_sma50_val * 100, 2)
+        # Geometric-mean based ranking metric using only deviations vs 15m SMA200 and daily SMA50.
+        # Idea: Convert each percentage deviation into a growth factor (1 + pct/100),
+        # then take geometric mean of the two and map back to a percentage.
+        rank_gm = None
+        try:
+            if pct_vs_15m_sma200 is not None and pct_vs_daily_sma50 is not None:
+                g1 = 1 + (pct_vs_15m_sma200 / 100.0)
+                g2 = 1 + (pct_vs_daily_sma50 / 100.0)
+                if g1 > 0 and g2 > 0:
+                    rank_gm = round(((g1 * g2)**0.5 - 1) * 100.0, 2)
+        except Exception:
+            rank_gm = None
         out[sym] = {
             "last_price": last_price,
             "last_close": last_close,
@@ -305,6 +317,7 @@ def fetch_ltp() -> Dict[str, Any]:
             "ratio_15m_50_200": ratio_15m_50_200,
             "pct_vs_15m_sma200": pct_vs_15m_sma200,
             "pct_vs_daily_sma50": pct_vs_daily_sma50,
+            "rank_gm": rank_gm,
             "daily_sma50": daily.get("sma50"),
             "daily_sma200": daily.get("sma200"),
             "daily_ratio_50_200": daily.get("ratio"),

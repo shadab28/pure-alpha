@@ -30,6 +30,7 @@
           <th data-key="last_price">Last Price</th>
           <th data-key="last_close">Last Close (15m)</th>
           <th data-key="ratio_15m_50_200">15m 50/200 Ratio</th>
+          <th data-key="rank_gm">Rank (GM)</th>
           <th data-key="pct_vs_15m_sma200">% vs 15m SMA200</th>
           <th data-key="pct_vs_daily_sma50">% vs Daily SMA50</th>
           <th data-key="daily_ratio_50_200">Daily 50/200 Ratio</th>
@@ -65,6 +66,7 @@
               sma200_15m: d.sma200_15m, // hidden
               sma50_15m: d.sma50_15m,   // hidden
               ratio_15m_50_200: d.ratio_15m_50_200,
+              rank_gm: d.rank_gm,
               pct_vs_15m_sma200: d.pct_vs_15m_sma200,
               pct_vs_daily_sma50: d.pct_vs_daily_sma50,
               daily_sma50: d.daily_sma50,   // hidden
@@ -81,6 +83,7 @@
               <td>${fmtNum(r.last_price)}</td>
               <td>${fmtNum(r.last_close)}</td>
               <td>${r.ratio_15m_50_200 != null ? r.ratio_15m_50_200.toFixed(2) : ''}</td>
+              <td>${r.rank_gm != null ? r.rank_gm.toFixed(2) : ''}</td>
               <td>${r.pct_vs_15m_sma200 != null ? r.pct_vs_15m_sma200.toFixed(2) + '%' : ''}</td>
               <td>${r.pct_vs_daily_sma50 != null ? r.pct_vs_daily_sma50.toFixed(2) + '%' : ''}</td>
               <td>${r.daily_ratio_50_200 != null ? r.daily_ratio_50_200.toFixed(2) : ''}</td>
