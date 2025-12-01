@@ -1,0 +1,43 @@
+# Python bytecode and build artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+*.egg
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# Environment files / secrets
+.env
+.env.*
+*.env
+Core_files/token.txt
+
+# Local data caches
+Csvs/*.csv
+
+# Jupyter checkpoints
+**/.ipynb_checkpoints/
+
+# macOS
+.DS_Store
+
+# VS Code workspace (keep common project files if needed)
+.vscode/*
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/settings.json
+
+# Logs
+*.log
+
+# Pytest / coverage
+.pytest_cache/
+.coverage
+htmlcov/
