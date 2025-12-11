@@ -18,7 +18,7 @@ import os
 import csv
 import sys
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, time as dt_time
 from zoneinfo import ZoneInfo
 import argparse
 import logging
@@ -164,6 +164,10 @@ def load_symbol_token_map(csv_path: str, symbols: List[str]) -> Tuple[Dict[str, 
 def run(universe_name: str | None, mode: str, log_level: str):
 	logging.basicConfig(level=getattr(logging, log_level.upper(), logging.INFO), format='[%(levelname)s] %(message)s')
 
+	# Startup timestamp
+	start_dt = datetime.now()
+	logging.info("Program starting at %s", start_dt.isoformat(sep=' '))
+
 	# Load params for instruments CSV path (and optionally default universe)
 	params = load_params(PARAM_YAML)
 	instruments_csv = params.get('instruments_csv') or os.path.join(REPO_ROOT, 'Csvs', 'instruments.csv')
@@ -305,10 +309,28 @@ def run(universe_name: str | None, mode: str, log_level: str):
 		minute = (dt.minute // 15) * 15
 		return dt.replace(minute=minute, second=0, microsecond=0)
 
+	def is_trading_bar(bar_end_dt: datetime) -> bool:
+		"""Return True if bar_end_dt (IST) falls within trading hours (Mon-Fri, 09:15–15:30)."""
+		# Monday=0, Sunday=6
+		if bar_end_dt.weekday() >= 5:
+			return False
+		t = bar_end_dt.time()
+		start = dt_time(9, 15)
+		end = dt_time(15, 30)
+		return start <= t <= end
+
 	# Simple monitor loop
 	try:
+		last_heartbeat_print: float = 0.0
 		while True:
 			time.sleep(5)
+			# Periodic running timestamp (every ~60s), rounded to minute and formatted hh:mm:ss
+			now_ts = time.time()
+			if now_ts - last_heartbeat_print >= 120:
+				cur = datetime.now()
+				cur_rounded = cur.replace(second=0, microsecond=0)
+				logging.info("Program running at %s", cur_rounded.strftime('%H:%M:%S'))
+				last_heartbeat_print = now_ts
 			# Persist at exact 00/15/30/45 minute boundaries
 			# Use exchange timezone (IST) and then store naive timestamps (timestamp without time zone)
 			now = datetime.now(ZoneInfo("Asia/Kolkata"))
@@ -319,7 +341,8 @@ def run(universe_name: str | None, mode: str, log_level: str):
 			last_saved = getattr(run, "_last_saved_bar_end")
 			# Save only when we are within the first 10 seconds of a 15m boundary and haven't saved it yet
 			if now - bar_end < timedelta(seconds=10) and bar_end != last_saved:
-				if test_connection():
+				# Bar boundary reached; save only during trading hours, otherwise just reset.
+				if is_trading_bar(bar_end) and test_connection():
 					# Use the bar end as ts (naive) for TIMESTAMP WITHOUT TIME ZONE
 					ts_naive = bar_end.replace(tzinfo=None)
 					try:
@@ -345,12 +368,14 @@ def run(universe_name: str | None, mode: str, log_level: str):
 									"INSERT INTO ohlcv_data(timeframe, stockname, candle_stock, open, high, low, close, volume) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
 									rows,
 								)
-						# mark saved and reset aggregation for next bar
-						setattr(run, "_last_saved_bar_end", bar_end)
-						agg.reset()
 						logging.info("Saved %d 15m candles to ohlcv_data at %s.", len(rows), ts_naive.isoformat(sep=' '))
 					except Exception as e:
 						logging.warning("Failed to save 15m candles: %s", e)
+				# Whether saved or not, mark boundary processed and reset aggregation
+				setattr(run, "_last_saved_bar_end", bar_end)
+				agg.reset()
+				if not is_trading_bar(bar_end):
+					logging.debug("Skipped saving candle outside trading hours at %s.", bar_end.isoformat())
 			# Optional periodic debug
 			# logging.debug("Heartbeat: %d symbols tracked", len(store.by_symbol))
 	except KeyboardInterrupt:

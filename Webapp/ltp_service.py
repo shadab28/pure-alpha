@@ -54,9 +54,20 @@ _daily_ma_thread_started = False
 
 _sma15m_cache: Dict[str, float] = {}
 _sma50_15m_cache: Dict[str, float] = {}
+_high200_15m_cache: Dict[str, float] = {}
 _last15m_close_cache: Dict[str, float] = {}
 _sma15m_last_ts: Optional[datetime] = None
 _sma15m_lock = threading.RLock()
+
+# Daily volume ratio cache: avg(5d volume) / avg(200d volume)
+_volratio_cache: Dict[str, float] = {}
+_volratio_last_ts: Optional[datetime] = None
+_volratio_lock = threading.RLock()
+
+# Days since last Golden Cross (SMA50 crossed above SMA200) per symbol
+_days_since_gc_cache: Dict[str, Optional[int]] = {}
+_days_since_gc_last_ts: Optional[datetime] = None
+_days_since_gc_lock = threading.RLock()
 
 DAILY_REFRESH_SECONDS = 3600  # recompute daily MAs at most once per hour
 FIFTEEN_MIN_REFRESH_SECONDS = 60  # recompute 15m SMA200 at most once per minute
@@ -186,6 +197,7 @@ def _refresh_sma15m_if_needed(symbols: List[str]):
     """Populate caches with:
     - 15m SMA200 (close) per symbol -> _sma15m_cache
     - Last completed 15m candle close -> _last15m_close_cache
+    - Recent 200-candle high (15m) -> _high200_15m_cache
     """
     if not test_connection() or pg_cursor is None:
         return
@@ -212,6 +224,22 @@ def _refresh_sma15m_if_needed(symbols: List[str]):
                 """
             )
             sma_rows = cur.fetchall()
+            # Recent 200-candle high (15m)
+            cur.execute(
+                """
+                WITH ranked AS (
+                    SELECT stockname, high,
+                           ROW_NUMBER() OVER (PARTITION BY stockname ORDER BY candle_stock DESC) AS rn
+                    FROM ohlcv_data
+                    WHERE timeframe='15m'
+                )
+                SELECT stockname,
+                       MAX(CASE WHEN rn <= 200 THEN high END) AS high200_15m
+                FROM ranked
+                GROUP BY stockname
+                """
+            )
+            high_rows = cur.fetchall()
             # Last 15m candle close
             cur.execute(
                 """
@@ -228,6 +256,12 @@ def _refresh_sma15m_if_needed(symbols: List[str]):
             for stockname, sma200, sma50 in sma_rows:
                 _sma15m_cache[stockname] = float(sma200) if sma200 is not None else None
                 _sma50_15m_cache[stockname] = float(sma50) if sma50 is not None else None
+            _high200_15m_cache.clear()
+            for stockname, high200 in high_rows:
+                try:
+                    _high200_15m_cache[stockname] = float(high200) if high200 is not None else None
+                except Exception:
+                    continue
             _last15m_close_cache.clear()
             for stockname, close_val in last_rows:
                 try:
@@ -235,6 +269,128 @@ def _refresh_sma15m_if_needed(symbols: List[str]):
                 except Exception:
                     continue
             _sma15m_last_ts = now
+    except Exception:
+        pass
+
+
+def _refresh_daily_volratio_if_needed(symbols: List[str]):
+    """Compute avg 5-day volume / avg 200-day volume per symbol from ohlcv_data (timeframe='1d')."""
+    if not test_connection() or pg_cursor is None:
+        return
+    global _volratio_last_ts
+    now = datetime.now()
+    # Refresh at most once every 15 minutes
+    if _volratio_last_ts and (now - _volratio_last_ts) < timedelta(minutes=15):
+        return
+    try:
+        with pg_cursor() as (cur, _):
+            cur.execute(
+                """
+                WITH ranked AS (
+                    SELECT stockname, volume,
+                           ROW_NUMBER() OVER (PARTITION BY stockname ORDER BY candle_stock DESC) AS rn
+                    FROM ohlcv_data
+                    WHERE timeframe='1d'
+                )
+                SELECT stockname,
+                       AVG(CASE WHEN rn <= 5 THEN volume END) AS avg5,
+                       AVG(CASE WHEN rn <= 200 THEN volume END) AS avg200
+                FROM ranked
+                GROUP BY stockname
+                """
+            )
+            rows = cur.fetchall()
+        with _volratio_lock:
+            _volratio_cache.clear()
+            for stockname, avg5, avg200 in rows:
+                try:
+                    a5 = float(avg5) if avg5 is not None else None
+                    a200 = float(avg200) if avg200 is not None else None
+                    ratio = None
+                    if a5 is not None and a200 and a200 != 0:
+                        ratio = round(a5 / a200, 2)
+                    _volratio_cache[stockname] = ratio  # may be None
+                except Exception:
+                    continue
+            _volratio_last_ts = now
+    except Exception:
+        pass
+
+
+def _refresh_days_since_golden_cross_if_needed(symbols: List[str]):
+    """Compute how many trading days since the last Golden Cross (SMA50 crossed above SMA200).
+
+    Uses ohlcv_data (timeframe='1d'). We approximate SMA50/SMA200 via rolling averages
+    using window functions and detect the most recent index where ratio crossed from <=1 to >1.
+    """
+    if not test_connection() or pg_cursor is None:
+        return
+    global _days_since_gc_last_ts
+    now = datetime.now()
+    # Refresh at most once every 15 minutes
+    if _days_since_gc_last_ts and (now - _days_since_gc_last_ts) < timedelta(minutes=15):
+        return
+    try:
+        with pg_cursor() as (cur, _):
+            # Compute rolling SMA50 and SMA200 and detect last golden cross per symbol
+            cur.execute(
+                """
+                WITH ordered AS (
+                    SELECT stockname, candle_stock, close,
+                           ROW_NUMBER() OVER (PARTITION BY stockname ORDER BY candle_stock) AS rn
+                    FROM ohlcv_data
+                    WHERE timeframe='1d'
+                ),
+                ma AS (
+                    SELECT stockname, candle_stock,
+                           AVG(close) OVER (PARTITION BY stockname ORDER BY candle_stock ROWS BETWEEN 49 PRECEDING AND CURRENT ROW) AS sma50,
+                           AVG(close) OVER (PARTITION BY stockname ORDER BY candle_stock ROWS BETWEEN 199 PRECEDING AND CURRENT ROW) AS sma200
+                    FROM ordered
+                ),
+                ratio AS (
+                    SELECT stockname, candle_stock,
+                           CASE WHEN sma200 IS NULL OR sma200 = 0 THEN NULL ELSE sma50 / sma200 END AS r
+                    FROM ma
+                ),
+                crossed AS (
+                    SELECT stockname, candle_stock, r,
+                           LAG(r) OVER (PARTITION BY stockname ORDER BY candle_stock) AS r_prev
+                    FROM ratio
+                ),
+                last_gc AS (
+                    SELECT stockname,
+                           MAX(candle_stock) AS last_gc_ts
+                    FROM crossed
+                    WHERE r_prev <= 1 AND r > 1
+                    GROUP BY stockname
+                ),
+                last_day AS (
+                    SELECT stockname, MAX(candle_stock) AS last_day_ts
+                    FROM ohlcv_data
+                    WHERE timeframe='1d'
+                    GROUP BY stockname
+                )
+                SELECT ld.stockname,
+                       CASE WHEN gc.last_gc_ts IS NULL THEN NULL
+                            ELSE (
+                                SELECT COUNT(*) FROM ohlcv_data d
+                                WHERE d.timeframe='1d' AND d.stockname=ld.stockname
+                                  AND d.candle_stock > gc.last_gc_ts AND d.candle_stock <= ld.last_day_ts
+                            )
+                       END AS days_since_gc
+                FROM last_day ld
+                LEFT JOIN last_gc gc ON gc.stockname = ld.stockname
+                """
+            )
+            rows = cur.fetchall()
+        with _days_since_gc_lock:
+            _days_since_gc_cache.clear()
+            for stockname, days_since in rows:
+                try:
+                    _days_since_gc_cache[stockname] = int(days_since) if days_since is not None else None
+                except Exception:
+                    _days_since_gc_cache[stockname] = None
+            _days_since_gc_last_ts = now
     except Exception:
         pass
 
@@ -261,6 +417,8 @@ def fetch_ltp() -> Dict[str, Any]:
 
     # Refresh 15m SMA200 cache if needed
     _refresh_sma15m_if_needed(symbols)
+    _refresh_daily_volratio_if_needed(symbols)
+    _refresh_days_since_golden_cross_if_needed(symbols)
 
     try:
         quote_data = kite.quote(list(instruments.values()))
@@ -273,7 +431,12 @@ def fetch_ltp() -> Dict[str, Any]:
     with _sma15m_lock:
         sma15m_snapshot = dict(_sma15m_cache)
         sma50_15m_snapshot = dict(_sma50_15m_cache)
-        last15m_snapshot = dict(_last15m_close_cache)
+    high200_15m_snapshot = dict(_high200_15m_cache)
+    last15m_snapshot = dict(_last15m_close_cache)
+    with _volratio_lock:
+        volratio_snapshot = dict(_volratio_cache)
+    with _days_since_gc_lock:
+        days_since_gc_snapshot = dict(_days_since_gc_cache)
 
     missing_last_close = 0
     for sym, exch_sym in instruments.items():
@@ -286,6 +449,10 @@ def fetch_ltp() -> Dict[str, Any]:
         daily = daily_cache_snapshot.get(sym) or {}
         sma200_15m = sma15m_snapshot.get(sym)
         sma50_15m = sma50_15m_snapshot.get(sym)
+        high200_15m = high200_15m_snapshot.get(sym)
+        vol_ratio = volratio_snapshot.get(sym)
+        days_since_gc = days_since_gc_snapshot.get(sym)
+
         ratio_15m_50_200 = None
         if sma50_15m and sma200_15m and sma200_15m != 0:
             ratio_15m_50_200 = round(sma50_15m / sma200_15m, 4)
@@ -297,6 +464,13 @@ def fetch_ltp() -> Dict[str, Any]:
         daily_sma50_val = daily.get("sma50")
         if isinstance(last_price, (int, float)) and isinstance(daily_sma50_val, (int, float)) and daily_sma50_val:
             pct_vs_daily_sma50 = round((last_price - daily_sma50_val) / daily_sma50_val * 100, 2)
+        # Drawdown from recent 200-candle high (15m) in %
+        drawdown_15m_200_pct = None
+        if isinstance(last_price, (int, float)) and isinstance(high200_15m, (int, float)) and high200_15m:
+            try:
+                drawdown_15m_200_pct = round((last_price - high200_15m) / high200_15m * 100, 2)
+            except Exception:
+                drawdown_15m_200_pct = None
         # Geometric-mean based ranking metric using only deviations vs 15m SMA200 and daily SMA50.
         # Idea: Convert each percentage deviation into a growth factor (1 + pct/100),
         # then take geometric mean of the two and map back to a percentage.
@@ -318,6 +492,9 @@ def fetch_ltp() -> Dict[str, Any]:
             "pct_vs_15m_sma200": pct_vs_15m_sma200,
             "pct_vs_daily_sma50": pct_vs_daily_sma50,
             "rank_gm": rank_gm,
+            "drawdown_15m_200_pct": drawdown_15m_200_pct,
+            "volume_ratio_d5_d200": vol_ratio,
+            "days_since_golden_cross": days_since_gc,
             "daily_sma50": daily.get("sma50"),
             "daily_sma200": daily.get("sma200"),
             "daily_ratio_50_200": daily.get("ratio"),

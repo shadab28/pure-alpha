@@ -82,12 +82,13 @@ def save_csv(path, rows):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--days', type=int, default=20, help='Days of data to fetch (approx rows)')
+    parser.add_argument('--timeframe', type=str, default=None, help="Override timeframe (e.g., '1d' or '15minute')")
     args = parser.parse_args()
 
     repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
     params = load_params(os.path.join(repo_root, 'Support Files', 'param.yaml'))
     universe_name = params.get('universe_list', 'allstocks')
-    timeframe = params.get('timeframe', '15minute')
+    timeframe = args.timeframe or params.get('timeframe', '15minute')
 
     symbols = get_universe(universe_name)
     if not symbols:
@@ -112,7 +113,9 @@ def main():
                 rows = fetch_symbol_ohlcv(cur, s, timeframe, limit)
                 # rows are returned newest first; reverse to chronological
                 rows = list(rows)[::-1]
-                out_path = os.path.join(out_dir, f"{s}_{timeframe}.csv")
+                # Normalize filename timeframe label (e.g., map 'day'/'daily' to '1d')
+                tf_label = '1d' if timeframe in ('day', 'daily') else timeframe
+                out_path = os.path.join(out_dir, f"{s}_{tf_label}.csv")
                 save_csv(out_path, rows)
                 print('Saved', out_path)
     except Exception as e:

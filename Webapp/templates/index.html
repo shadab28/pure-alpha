@@ -5,41 +5,243 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>LTP Dashboard</title>
     <style>
-      body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif; margin: 24px; }
-      h1 { font-size: 20px; margin-bottom: 12px; }
-      table { border-collapse: collapse; width: 100%; }
-      th, td { border: 1px solid #ddd; padding: 8px; font-size: 14px; }
-      th { background: #f6f8fa; text-align: left; }
-      tr:nth-child(even) { background: #fafafa; }
-      .muted { color: #555; }
+      :root {
+        --blue-900: #0a2540;
+        --blue-700: #1e3a8a;
+        --blue-600: #2563eb;
+        --blue-100: #eaf2ff;
+        --blue-050: #f5f8ff;
+        --white: #ffffff;
+        --border: #d9e2f1;
+        --text: #0f172a;
+        --muted: #5b6b86;
+        --success: #0a7d34;
+        --danger: #b00020;
+      }
+      body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif; margin: 24px; color: var(--text); background: var(--blue-050); }
+      .header { display:flex; align-items:center; justify-content:space-between; margin-bottom: 16px; }
+      h1 { font-size: 22px; margin: 0; color: var(--blue-900); }
+      #meta { font-size: 13px; margin-left: 8px; color: var(--muted); }
+
+      .card { background: var(--white); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 2px 6px rgba(10,37,64,0.06); }
+      .card-header { padding: 12px 16px; border-bottom: 1px solid var(--border); background: var(--blue-100); }
+      .card-body { padding: 12px 16px; }
+
       .btn-row { margin-bottom: 12px; }
-      button { padding: 6px 12px; margin-right: 6px; cursor: pointer; }
+      .btn { padding: 8px 12px; margin-right: 6px; cursor: pointer; border: 1px solid var(--blue-600); color: var(--white); background: var(--blue-600); border-radius: 6px; font-weight: 600; }
+      .btn.secondary { color: var(--blue-700); background: var(--white); border-color: var(--blue-700); }
+      .btn:hover { filter: brightness(1.05); }
+  .btn.small { padding: 4px 8px; font-size: 12px; }
+
+      table { border-collapse: collapse; width: 100%; }
+      th, td { border: 1px solid var(--border); padding: 8px; font-size: 14px; }
+      th { background: var(--blue-100); text-align: left; color: var(--blue-900); }
+      tbody tr:nth-child(even) { background: var(--blue-050); }
+      tbody tr:hover { background: #eef4ff; }
+
+      .badge { display:inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; }
+      .badge.rank { background: #e9f0ff; color: var(--blue-700); border: 1px solid var(--border); }
+  .num { font-weight: 600; }
+      .muted { color: var(--muted); }
+      #error { color: var(--danger); margin-bottom: 8px; }
     </style>
   </head>
   <body>
-    <h1>LTP Dashboard <span id="meta" class="muted"></span></h1>
-    <div class="btn-row">
-      <button onclick="downloadCSV()">Download CSV</button>
-      <button onclick="manualRefresh()">Refresh Now</button>
+    <div class="header">
+      <h1>LTP Dashboard <span id="meta" class="muted"></span></h1>
+      <div class="btn-row">
+        <button class="btn" onclick="downloadCSV()">Download CSV</button>
+        <button class="btn secondary" onclick="manualRefresh()">Refresh Now</button>
+      </div>
     </div>
-    <div id="error" style="color:#b00020; margin-bottom:8px;"></div>
+    <div id="error"></div>
+
+    <!-- Tabs -->
+    <div class="btn-row" style="margin-top:-4px;">
+  <button id="tab-main" class="btn secondary">All</button>
+  <button id="tab-filtered" class="btn secondary">Filtered</button>
+  <button id="tab-orders" class="btn secondary">Orders</button>
+    </div>
+
+    <!-- Main view -->
+    <div id="view-main" class="card">
+      <div class="card-header" style="display:flex;align-items:center;justify-content:space-between;">
+        <span>Live Stock Metrics</span>
+        <button id="btn-show-filtered" class="btn secondary">Filter</button>
+      </div>
+      <div class="card-body">
     <table id="ltp-table">
       <thead>
         <tr>
           <th data-key="symbol">Symbol</th>
+          <th data-key="rank_gm">Rank (GM)</th>
+          <th data-key="drawdown_15m_200_pct">Drawdown %</th>
+          <th data-key="days_since_golden_cross">Days Since Crossover</th>
           <th data-key="last_price">Last Price</th>
           <th data-key="last_close">Last Close (15m)</th>
-          <th data-key="ratio_15m_50_200">15m 50/200 Ratio</th>
-          <th data-key="rank_gm">Rank (GM)</th>
           <th data-key="pct_vs_15m_sma200">% vs 15m SMA200</th>
+          <th data-key="ratio_15m_50_200">15m 50/200 Ratio</th>
           <th data-key="pct_vs_daily_sma50">% vs Daily SMA50</th>
           <th data-key="daily_ratio_50_200">Daily 50/200 Ratio</th>
+          <th data-key="volume_ratio_d5_d200">Volume Ratio</th>
+          <th>Buy + SL 5% (₹10k)</th>
         </tr>
       </thead>
       <tbody></tbody>
     </table>
+      </div>
+    </div>
+
+    <!-- Filtered view -->
+    <div id="view-filtered" class="card" style="display:none; margin-top:14px;">
+      <div class="card-header">Filtered Metrics</div>
+      <div class="card-body">
+        <div style="display:flex; flex-wrap:wrap; gap:12px; align-items:flex-end; margin-bottom:10px;">
+          <div>
+            <div class="muted" style="font-size:12px;">Rank (GM) min</div>
+            <input id="f-rank-min" type="number" step="0.01" placeholder="min" style="padding:6px; width:120px;" />
+          </div>
+          <div>
+            <div class="muted" style="font-size:12px;">Rank (GM) max</div>
+            <input id="f-rank-max" type="number" step="0.01" placeholder="max" style="padding:6px; width:120px;" />
+          </div>
+          <div>
+            <div class="muted" style="font-size:12px;">15m 50/200 Ratio min</div>
+            <input id="f-r15-min" type="number" step="0.01" placeholder="min" style="padding:6px; width:140px;" />
+          </div>
+          <div>
+            <div class="muted" style="font-size:12px;">15m 50/200 Ratio max</div>
+            <input id="f-r15-max" type="number" step="0.01" placeholder="max" style="padding:6px; width:140px;" />
+          </div>
+          <div>
+            <div class="muted" style="font-size:12px;">Daily 50/200 Ratio min</div>
+            <input id="f-rd-min" type="number" step="0.01" placeholder="min" style="padding:6px; width:140px;" />
+          </div>
+          <div>
+            <div class="muted" style="font-size:12px;">Daily 50/200 Ratio max</div>
+            <input id="f-rd-max" type="number" step="0.01" placeholder="max" style="padding:6px; width:140px;" />
+          </div>
+          <div>
+            <div class="muted" style="font-size:12px;">Drawdown % min</div>
+            <input id="f-dd-min" type="number" step="0.01" placeholder="min" style="padding:6px; width:120px;" />
+          </div>
+          <div>
+            <div class="muted" style="font-size:12px;">Drawdown % max</div>
+            <input id="f-dd-max" type="number" step="0.01" placeholder="max" style="padding:6px; width:120px;" />
+          </div>
+          <div>
+            <button class="btn" id="apply-filters">Apply Filters</button>
+            <button class="btn secondary" id="reset-filters" style="margin-left:6px;">Reset</button>
+          </div>
+        </div>
+        <table id="ltp-table-filtered">
+          <thead>
+            <tr>
+              <th data-key="symbol">Symbol</th>
+              <th data-key="rank_gm">Rank (GM)</th>
+              <th data-key="drawdown_15m_200_pct">Drawdown %</th>
+              <th data-key="days_since_golden_cross">Days Since Crossover</th>
+              <th data-key="last_price">Last Price</th>
+              <th data-key="last_close">Last Close (15m)</th>
+              <th data-key="pct_vs_15m_sma200">% vs 15m SMA200</th>
+              <th data-key="ratio_15m_50_200">15m 50/200 Ratio</th>
+              <th data-key="pct_vs_daily_sma50">% vs Daily SMA50</th>
+              <th data-key="daily_ratio_50_200">Daily 50/200 Ratio</th>
+              <th data-key="volume_ratio_d5_d200">Volume Ratio</th>
+              <th>Buy + SL 5% (₹10k)</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Orders view -->
+    <div id="view-orders" class="card" style="display:none; margin-top:14px;">
+      <div class="card-header" style="display:flex;align-items:center;justify-content:space-between;">
+        <span>Orders placed via Webapp <span id="orders-meta" class="muted"></span></span>
+        <div style="display:flex; gap:10px; align-items:center;">
+          <span class="muted" id="bracket-params">Bracket: Target +7.5% / Stop -5% (Trailing on)</span>
+          <button class="btn secondary" id="btn-refresh-orders">Refresh</button>
+        </div>
+      </div>
+      <div class="card-body">
+  <table id="orders-table">
+          <thead>
+            <tr>
+              <th data-key="symbol">Symbol</th>
+              <th data-key="quantity">Qty</th>
+              <th data-key="status">Status</th>
+              <th data-key="avg_price">Avg/Entry</th>
+              <th data-key="ltp">LTP</th>
+              <th data-key="trail_trigger">Trailing Stop</th>
+              <th data-key="gtt_stop_price">Stop (GTT)</th>
+              <th data-key="gtt_stop_pct_from_ltp">Stop % from LTP</th>
+              <th data-key="gtt_target_price">Target (GTT)</th>
+              <th data-key="gtt_target_pct_from_ltp">Target % from LTP</th>
+              <th data-key="pnl">PnL (₹)</th>
+              <th data-key="pnl_pct">PnL %</th>
+              <th data-key="order_id">Order ID</th>
+              <th data-key="gtt_id">GTT ID</th>
+      <th data-key="total_pnl">Total PnL (₹)</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+          <tfoot>
+            <tr>
+              <td colspan="12" style="text-align:right; font-weight:600;">Total PnL:</td>
+              <td id="orders-total-pnl-cell" class="num"></td>
+            </tr>
+          </tfoot>
+        </table>
+        <div id="orders-total-pnl" class="num" style="margin-top:6px; font-size:14px;"></div>
+        <div style="margin-top:12px; display:flex; align-items:center; justify-content:space-between;">
+          <div class="muted">Consolidated (Holdings / Positions / Active Orders / Trades / GTT)</div>
+        </div>
+        <table id="orders-snapshot" style="margin-top:6px;">
+          <thead>
+            <tr>
+              <th data-key="symbol">Symbol</th>
+              <th data-key="total_holdings">Total Holding Amount (₹)</th>
+              <th data-key="holding_ltp">LTP</th>
+              <th data-key="holding_avg">Holding Avg (₹)</th>
+              <th data-key="holding_qty">Holding Qty</th>
+              <th data-key="holding_pnl">PnL Holding (₹)</th>
+              <th data-key="position_avg">Position Avg (₹)</th>
+              <th data-key="position_qty">Position Qty</th>
+              <th data-key="position_pnl_day">PnL Position (₹)</th>
+              <th data-key="active_orders">Active Orders</th>
+              <th data-key="combined_pnl">Combined PnL (₹)</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
     <script>
-      async function fetchLTP() {
+      // Map a numeric value to a green↔red color using HSL.
+      // value in [min,max] -> hue in [0 (red), 120 (green)]
+      function hueForValue(value, min, max){
+        if (typeof value !== 'number' || isNaN(value) || max === min) return null;
+        const clamped = Math.max(min, Math.min(max, value));
+        const t = (clamped - min) / (max - min);
+        const hue = 120 * t; // 0=red, 120=green
+        return `hsl(${hue}, 70%, 38%)`;
+      }
+      // Percent gradient helper: default range -20%..+20%
+      function pctColor(v, min=-20, max=20){ return hueForValue(v, min, max); }
+      // Inverse percent (lower is greener), e.g., drawdown: range 0..20
+      function inversePctColor(v, min=0, max=20){
+        if (typeof v !== 'number' || isNaN(v) || max === min) return null;
+        const clamped = Math.max(min, Math.min(max, v));
+        const t = (max - clamped) / (max - min); // lower v => higher t (greener)
+        const hue = 120 * t;
+        return `hsl(${hue}, 70%, 38%)`;
+      }
+
+  let latestRows = [];
+
+  async function fetchLTP() {
         const err = document.getElementById('error');
         err.textContent = '';
         try {
@@ -60,44 +262,109 @@
             const pct = (typeof lp === 'number' && typeof lc === 'number' && lc) ? ((lp - lc) / lc * 100) : null;
             return {
               symbol: s,
+              rank_gm: d.rank_gm,
               last_price: lp,
               last_close: lc,
               pct_change: pct,
               sma200_15m: d.sma200_15m, // hidden
               sma50_15m: d.sma50_15m,   // hidden
               ratio_15m_50_200: d.ratio_15m_50_200,
-              rank_gm: d.rank_gm,
               pct_vs_15m_sma200: d.pct_vs_15m_sma200,
               pct_vs_daily_sma50: d.pct_vs_daily_sma50,
+              drawdown_15m_200_pct: d.drawdown_15m_200_pct,
+              days_since_golden_cross: d.days_since_golden_cross,
               daily_sma50: d.daily_sma50,   // hidden
               daily_sma200: d.daily_sma200, // hidden
-              daily_ratio_50_200: d.daily_ratio_50_200
+              daily_ratio_50_200: d.daily_ratio_50_200,
+              volume_ratio_d5_d200: d.volume_ratio_d5_d200
             };
           });
-          applySort(rows);
-          tbody.innerHTML = '';
-          for (const r of rows) {
-            const tr = document.createElement('tr');
-            tr.innerHTML = `
-              <td>${r.symbol}</td>
-              <td>${fmtNum(r.last_price)}</td>
-              <td>${fmtNum(r.last_close)}</td>
-              <td>${r.ratio_15m_50_200 != null ? r.ratio_15m_50_200.toFixed(2) : ''}</td>
-              <td>${r.rank_gm != null ? r.rank_gm.toFixed(2) : ''}</td>
-              <td>${r.pct_vs_15m_sma200 != null ? r.pct_vs_15m_sma200.toFixed(2) + '%' : ''}</td>
-              <td>${r.pct_vs_daily_sma50 != null ? r.pct_vs_daily_sma50.toFixed(2) + '%' : ''}</td>
-              <td>${r.daily_ratio_50_200 != null ? r.daily_ratio_50_200.toFixed(2) : ''}</td>
-            `;
-            tbody.appendChild(tr);
-          }
+          latestRows = rows;
+          renderMainTable();
+          renderFilteredTable();
         } catch (e) {
           err.textContent = e.message;
         }
       }
+      function rowHtml(r){
+        return `
+          <td>${r.symbol}</td>
+          <td><span class="badge rank">${r.rank_gm != null ? r.rank_gm.toFixed(2) : ''}</span></td>
+          <td><span class="num" style="color:${r.drawdown_15m_200_pct!=null? inversePctColor(Math.abs(r.drawdown_15m_200_pct)) : ''}">${r.drawdown_15m_200_pct != null ? Math.abs(r.drawdown_15m_200_pct).toFixed(2) + '%' : ''}</span></td>
+          <td>${r.days_since_golden_cross != null ? r.days_since_golden_cross : ''}</td>
+          <td>${fmtNum(r.last_price)}</td>
+          <td>${fmtNum(r.last_close)}</td>
+          <td><span class="num" style="color:${r.pct_vs_15m_sma200!=null? pctColor(r.pct_vs_15m_sma200) : ''}">${r.pct_vs_15m_sma200 != null ? r.pct_vs_15m_sma200.toFixed(2) + '%' : ''}</span></td>
+          <td>${r.ratio_15m_50_200 != null ? r.ratio_15m_50_200.toFixed(2) : ''}</td>
+          <td><span class="num" style="color:${r.pct_vs_daily_sma50!=null? pctColor(r.pct_vs_daily_sma50) : ''}">${r.pct_vs_daily_sma50 != null ? r.pct_vs_daily_sma50.toFixed(2) + '%' : ''}</span></td>
+          <td>${r.daily_ratio_50_200 != null ? r.daily_ratio_50_200.toFixed(2) : ''}</td>
+          <td>${r.volume_ratio_d5_d200 != null ? r.volume_ratio_d5_d200.toFixed(2) : ''}</td>
+          <td><button class="btn small" onclick="placeBuy('${r.symbol}', this)" ${typeof r.last_price==='number' ? '' : 'disabled'}>Buy</button></td>
+        `;
+      }
+
+      function renderMainTable(){
+        const tbody = document.querySelector('#ltp-table tbody');
+        const rows = latestRows.slice();
+        applySort(rows, sortStateMain);
+        tbody.innerHTML = '';
+        for (const r of rows){
+          const tr = document.createElement('tr');
+          tr.innerHTML = rowHtml(r);
+          tbody.appendChild(tr);
+        }
+      }
+
+      function getFilters(){
+        const val = id => document.getElementById(id).value;
+        const num = v => (v === '' || v == null) ? null : Number(v);
+        return {
+          rankMin: num(val('f-rank-min')),
+          rankMax: num(val('f-rank-max')),
+          r15Min: num(val('f-r15-min')),
+          r15Max: num(val('f-r15-max')),
+          rdMin: num(val('f-rd-min')),
+          rdMax: num(val('f-rd-max')),
+          ddMin: num(val('f-dd-min')),
+          ddMax: num(val('f-dd-max')),
+        };
+      }
+
+      function matchFilters(r, f){
+        // rank
+        if (f.rankMin != null && (r.rank_gm == null || r.rank_gm < f.rankMin)) return false;
+        if (f.rankMax != null && (r.rank_gm == null || r.rank_gm > f.rankMax)) return false;
+        // 15m ratio
+        if (f.r15Min != null && (r.ratio_15m_50_200 == null || r.ratio_15m_50_200 < f.r15Min)) return false;
+        if (f.r15Max != null && (r.ratio_15m_50_200 == null || r.ratio_15m_50_200 > f.r15Max)) return false;
+        // daily ratio
+        if (f.rdMin != null && (r.daily_ratio_50_200 == null || r.daily_ratio_50_200 < f.rdMin)) return false;
+        if (f.rdMax != null && (r.daily_ratio_50_200 == null || r.daily_ratio_50_200 > f.rdMax)) return false;
+        // drawdown (use absolute positive value)
+        const ddAbs = (typeof r.drawdown_15m_200_pct === 'number') ? Math.abs(r.drawdown_15m_200_pct) : null;
+        if (f.ddMin != null && (ddAbs == null || ddAbs < f.ddMin)) return false;
+        if (f.ddMax != null && (ddAbs == null || ddAbs > f.ddMax)) return false;
+        return true;
+      }
+
+      function renderFilteredTable(){
+        const tbody = document.querySelector('#ltp-table-filtered tbody');
+        const f = getFilters();
+        const arr = latestRows.filter(r => matchFilters(r, f));
+        applySort(arr, sortStateFiltered);
+        tbody.innerHTML = '';
+        for (const r of arr){
+          const tr = document.createElement('tr');
+          tr.innerHTML = rowHtml(r);
+          tbody.appendChild(tr);
+        }
+      }
       function fmtNum(v){ return (typeof v === 'number' && !isNaN(v)) ? v.toFixed(2) : ''; }
-      let sortState = { key: 'symbol', dir: 'asc' };
-      function applySort(arr){
-        const { key, dir } = sortState;
+      function numSignClass(v){ if (typeof v !== 'number' || isNaN(v)) return ''; return v >= 0 ? 'pos' : 'neg'; }
+      let sortStateMain = { key: 'symbol', dir: 'asc' };
+      let sortStateFiltered = { key: 'symbol', dir: 'asc' };
+      function applySort(arr, state){
+        const { key, dir } = state;
         arr.sort((a,b)=>{
           const va = a[key];
           const vb = b[key];
@@ -108,26 +375,343 @@
           return dir==='asc'? String(va).localeCompare(String(vb)) : String(vb).localeCompare(String(va));
         });
       }
-      function attachSorting(){
-        const ths = document.querySelectorAll('th[data-key]');
+      function attachSortingFor(tableId, state, renderFn){
+        const ths = document.querySelectorAll(`#${tableId} th[data-key]`);
         ths.forEach(th=>{
           th.style.cursor='pointer';
           th.addEventListener('click', ()=>{
             const key = th.getAttribute('data-key');
-            if (sortState.key === key){
-              sortState.dir = sortState.dir === 'asc' ? 'desc' : 'asc';
+            if (state.key === key){
+              state.dir = state.dir === 'asc' ? 'desc' : 'asc';
             } else {
-              sortState.key = key; sortState.dir = 'asc';
+              state.key = key; state.dir = 'asc';
             }
-            fetchLTP();
+            renderFn();
           });
         });
       }
-      attachSorting();
+      attachSortingFor('ltp-table', sortStateMain, renderMainTable);
+      attachSortingFor('ltp-table-filtered', sortStateFiltered, renderFilteredTable);
       function manualRefresh(){ fetchLTP(); }
       function downloadCSV(){ window.location = '/export/ltp.csv'; }
+      // Tabs logic
+      const tabMain = document.getElementById('tab-main');
+      const tabFiltered = document.getElementById('tab-filtered');
+      const tabOrders = document.getElementById('tab-orders');
+      function setActiveTab(which){
+        if (which === 'main'){
+          document.getElementById('view-main').style.display='block';
+          document.getElementById('view-filtered').style.display='none';
+          document.getElementById('view-orders').style.display='none';
+          tabMain.classList.remove('secondary');
+          tabFiltered.classList.add('secondary');
+          tabOrders.classList.add('secondary');
+        } else {
+          document.getElementById('view-main').style.display='none';
+          document.getElementById('view-orders').style.display='none';
+          document.getElementById('view-filtered').style.display='block';
+          tabFiltered.classList.remove('secondary');
+          tabMain.classList.add('secondary');
+          tabOrders.classList.add('secondary');
+        }
+      }
+      function setOrdersTab(){
+        document.getElementById('view-main').style.display='none';
+        document.getElementById('view-filtered').style.display='none';
+        document.getElementById('view-orders').style.display='block';
+        tabOrders.classList.remove('secondary');
+        tabMain.classList.add('secondary');
+        tabFiltered.classList.add('secondary');
+  ensureOrdersEvents();
+  fetchOrders();
+        }
+      tabMain.addEventListener('click', ()=> setActiveTab('main'));
+      tabFiltered.addEventListener('click', ()=> setActiveTab('filtered'));
+      tabOrders.addEventListener('click', ()=> setOrdersTab());
+
+  // Filters handlers
+      document.getElementById('apply-filters').addEventListener('click', ()=> renderFilteredTable());
+      document.getElementById('reset-filters').addEventListener('click', ()=>{
+        ['f-rank-min','f-rank-max','f-r15-min','f-r15-max','f-rd-min','f-rd-max','f-dd-min','f-dd-max'].forEach(id=>{ const el = document.getElementById(id); if (el) el.value=''; });
+        renderFilteredTable();
+      });
+
+  // Header Filter button to show filtered view
+  const btnShowFiltered = document.getElementById('btn-show-filtered');
+  if (btnShowFiltered){ btnShowFiltered.addEventListener('click', ()=> setActiveTab('filtered')); }
+
+  // Place LIMIT buy at 0.1% below LTP with 5% GTT stop-loss for ₹10,000
+      async function placeBuy(symbol, btn){
+        try{
+          if (!symbol) return;
+          const ok = window.confirm(`Place BUY (CNC LIMIT) for ${symbol} at 0.1% below LTP with ₹10,000 budget and attach 5% GTT Stop-Loss?`);
+          if (!ok) return;
+          if (btn){ btn.disabled = true; btn.textContent = 'Placing…'; }
+          const res = await fetch('/api/order/buy', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ symbol, budget: 10000, market: false, offset_pct: 0.0005, tsl: true, sl_pct: 0.05 })
+          });
+          const json = await res.json();
+          if (!res.ok){ throw new Error(json.error || 'Order failed'); }
+          const gttMsg = json.gtt_id ? `\nGTT SL ID: ${json.gtt_id}` : '';
+          const pxMsg = json.limit_price ? `\nLimit: ₹${Number(json.limit_price).toFixed(2)}` : '';
+          alert(`Order Placed\nSymbol: ${json.symbol}\nQty: ${json.quantity}${pxMsg}\nOrder ID: ${json.order_id}${gttMsg}`);
+        } catch(e){
+          alert(`Order error: ${e.message || e}`);
+        } finally {
+          if (btn){ btn.disabled = false; btn.textContent = 'Buy'; }
+        }
+      }
+
       fetchLTP();
       setInterval(fetchLTP, 5000);
+
+      // ========== Orders view logic ==========
+      let latestOrders = [];
+      let sortStateOrders = { key: 'symbol', dir: 'asc' };
+      attachSortingFor('orders-table', sortStateOrders, renderOrdersTable);
+
+      function fmtMaybe(v){ return (v==null || Number.isNaN(v)) ? '' : v; }
+      function fmtPrice(v){ return (typeof v==='number' && !isNaN(v)) ? v.toFixed(2) : ''; }
+      function fmtPct(v){ return (typeof v==='number' && !isNaN(v)) ? v.toFixed(2) + '%' : ''; }
+      function pnlColor(v){ if (typeof v!=='number' || isNaN(v)) return ''; return v>=0? 'color: hsl(120,70%,38%);' : 'color:hsl(0,70%,38%);'; }
+
+    async function fetchOrders(){
+        try{
+          const res = await fetch('/api/orders');
+          const json = await res.json();
+          if (!res.ok) throw new Error(json.error || 'Failed to fetch orders');
+          const arr = (json.orders || []).map(o=>({
+            order_id: o.order_id,
+            symbol: o.symbol,
+            quantity: o.quantity,
+            status: o.status,
+            avg_price: (typeof o.avg_price==='number')? o.avg_price : (o.avg_price? Number(o.avg_price): null),
+            ltp: (typeof o.ltp==='number')? o.ltp : (o.ltp? Number(o.ltp): null),
+            trail_trigger: (typeof o.trail_trigger==='number')? o.trail_trigger : (o.trail_trigger? Number(o.trail_trigger): null),
+            gtt_stop_price: (typeof o.gtt_stop_price==='number')? o.gtt_stop_price : (o.gtt_stop_price? Number(o.gtt_stop_price): null),
+            gtt_stop_pct_from_ltp: (typeof o.gtt_stop_pct_from_ltp==='number')? o.gtt_stop_pct_from_ltp : (o.gtt_stop_pct_from_ltp? Number(o.gtt_stop_pct_from_ltp): null),
+            gtt_target_price: (typeof o.gtt_target_price==='number')? o.gtt_target_price : (o.gtt_target_price? Number(o.gtt_target_price): null),
+            gtt_target_pct_from_ltp: (typeof o.gtt_target_pct_from_ltp==='number')? o.gtt_target_pct_from_ltp : (o.gtt_target_pct_from_ltp? Number(o.gtt_target_pct_from_ltp): null),
+            pnl: (typeof o.pnl==='number')? o.pnl : (o.pnl? Number(o.pnl): null),
+            pnl_pct: (typeof o.pnl_pct==='number')? o.pnl_pct : (o.pnl_pct? Number(o.pnl_pct): null),
+            gtt_id: o.gtt_id || ''
+          }));
+          latestOrders = arr;
+          document.getElementById('orders-meta').textContent = `(${arr.length})`;
+          renderOrdersTable();
+      // also fetch consolidated snapshots
+      await fetchOrdersSnapshot();
+        }catch(e){
+          document.getElementById('orders-meta').textContent = '(error)';
+        }
+      }
+
+      function renderOrdersTable(){
+        const tbody = document.querySelector('#orders-table tbody');
+        const rows = latestOrders.slice();
+        applySort(rows, sortStateOrders);
+        tbody.innerHTML = '';
+        let totalPnlSum = 0;
+        for (const r of rows){
+          const tr = document.createElement('tr');
+          tr.innerHTML = `
+            <td>${r.symbol||''}</td>
+            <td>${fmtMaybe(r.quantity)}</td>
+            <td>${r.status||''}</td>
+            <td>${fmtPrice(r.avg_price)}</td>
+            <td>${fmtPrice(r.ltp)}</td>
+            <td>${fmtPrice(r.trail_trigger)}</td>
+            <td>${fmtPrice(r.gtt_stop_price)}</td>
+            <td>${fmtPct(r.gtt_stop_pct_from_ltp)}</td>
+            <td>${fmtPrice(r.gtt_target_price)}</td>
+            <td>${fmtPct(r.gtt_target_pct_from_ltp)}</td>
+            <td><span class="num" style="${pnlColor(r.pnl)}">${fmtPrice(r.pnl)}</span></td>
+            <td><span class="num" style="${pnlColor(r.pnl)}">${fmtPct(r.pnl_pct)}</span></td>
+            <td>${r.order_id||''}</td>
+            <td>${r.gtt_id||''}</td>
+            <td><span class="num" style="${pnlColor(r.pnl)}">${fmtPrice(r.pnl)}</span></td>
+          `;
+          tbody.appendChild(tr);
+          if (typeof r.pnl === 'number' && !Number.isNaN(r.pnl)) totalPnlSum += r.pnl;
+        }
+        const totalEl = document.getElementById('orders-total-pnl');
+        const totalCell = document.getElementById('orders-total-pnl-cell');
+        const color = totalPnlSum >= 0 ? 'hsl(120,70%,38%)' : 'hsl(0,70%,38%)';
+        if (totalEl){
+          totalEl.style.color = color;
+          totalEl.textContent = `Total Orders PnL: ₹${Number(totalPnlSum).toFixed(2)}`;
+        }
+        if (totalCell){
+          totalCell.style.color = color;
+          totalCell.textContent = `${Number(totalPnlSum).toFixed(2)}`;
+        }
+      }
+
+      document.getElementById('btn-refresh-orders').addEventListener('click', fetchOrders);
+      // Server-Sent Events for orders; remove 5s polling
+      let ordersES = null;
+      function ensureOrdersEvents(){
+        if (ordersES) return;
+        try{
+          ordersES = new EventSource('/events/orders');
+          ordersES.onmessage = (ev)=>{
+            try{
+              const msg = JSON.parse(ev.data);
+              if (msg.type === 'snapshot'){
+                latestOrders = (msg.orders||[]).map(o=>({
+                  order_id: o.order_id || o.id,
+                  symbol: o.tradingsymbol || o.symbol,
+                  quantity: o.quantity,
+                  status: o.status,
+                  avg_price: (typeof o.average_price==='number')? o.average_price : (o.average_price? Number(o.average_price): null)
+                }));
+                renderOrdersTable();
+                fetchOrdersSnapshot();
+              } else if (msg.type === 'order_update'){
+                const o = msg.order||{};
+                const oid = String(o.order_id||o.id||'');
+                if (oid){
+                  const idx = latestOrders.findIndex(x=> String(x.order_id)===oid);
+                  const updated = {
+                    order_id: oid,
+                    symbol: o.tradingsymbol||o.symbol,
+                    quantity: o.quantity,
+                    status: o.status,
+                    avg_price: (typeof o.average_price==='number')? o.average_price : (o.average_price? Number(o.average_price): null)
+                  };
+                  if (idx>=0) latestOrders[idx] = { ...latestOrders[idx], ...updated };
+                  else latestOrders.push(updated);
+                  renderOrdersTable();
+                  fetchOrdersSnapshot();
+                }
+              }
+            }catch(e){ /* ignore parse errors */ }
+          };
+        }catch(e){ /* ignore SSE errors */ }
+      }
+
+      // ---------- Consolidated snapshot (holdings/positions/orderbook/trades/gtt) ----------
+      async function fetchJSON(path){ const r = await fetch(path); const j = await r.json(); if (!r.ok) throw new Error(j.error||`Failed: ${path}`); return j; }
+      function num(v){ return (typeof v==='number')? v : (v!=null? Number(v) : null); }
+      async function fetchOrdersSnapshot(){
+  // uses global snapshot controls state
+        try{
+          const [hold, pos, ob, trades] = await Promise.all([
+            fetchJSON('/api/holdings'),
+            fetchJSON('/api/positions'),
+            fetchJSON('/api/orderbook'),
+            fetchJSON('/api/trades'),
+          ]);
+          const holdings = (hold.holdings||[]).reduce((m,h)=>{ if (h.tradingsymbol) m[h.tradingsymbol] = h; return m; },{});
+          const posNet = ((pos.net)||[]).reduce((m,p)=>{ if (p.tradingsymbol) m[p.tradingsymbol] = p; return m; },{});
+          const activeBySym = (ob.orders||[]).reduce((m,o)=>{ const s=o.tradingsymbol||o.symbol; if(!s) return m; m[s] = (m[s]||0)+1; return m; },{});
+          const tradesBySym = (trades.trades||[]).reduce((m,t)=>{ const s=t.tradingsymbol||t.symbol; if(!s) return m; m[s] = (m[s]||0)+1; return m; },{});
+          const gttBySymbol = trades.gtt_by_symbol||{}; // built server-side
+          const symbols = new Set([
+            ...Object.keys(holdings),
+            ...Object.keys(posNet),
+            ...Object.keys(activeBySym),
+            ...Object.keys(tradesBySym),
+            ...Object.keys(gttBySymbol),
+            ...latestOrders.map(o=>o.symbol).filter(Boolean),
+          ]);
+          const rows = [];
+          symbols.forEach(s=>{
+            const h = holdings[s]||{};
+            const p = posNet[s]||{};
+            const g = gttBySymbol[s]||{ count:0, items:[] };
+            const hQty = num(h.quantity);
+            const hAvg = num(h.average_price||h.average);
+            const hLtp = num(h.last_price);
+            const holdPnl = num(h.holding_pnl);
+            const posQty = num(p.quantity);
+            const posAvg = num(p.average_price||p.avg_price||p.price);
+            const posDayPnl = num(p.pnl||p.day_pnl||p.m2m);
+            const totalAmount = (typeof hQty==='number' && typeof hLtp==='number') ? (hQty * hLtp) : null;
+            const totalHoldings = (typeof hQty==='number' && typeof hAvg==='number') ? (hQty * hAvg) : null;
+            const totalHoldingsCombined = (
+              (typeof hQty==='number' && typeof hAvg==='number' ? (hQty*hAvg) : 0) +
+              (typeof posQty==='number' && typeof posAvg==='number' ? (posQty*posAvg) : 0)
+            );
+            const totalStockPnl = ((typeof holdPnl==='number'? holdPnl:0) + (typeof posDayPnl==='number'? posDayPnl:0));
+            rows.push({
+              symbol: s,
+              total_holdings: totalHoldings,
+              holding_qty: hQty,
+              holding_avg: hAvg,
+              holding_ltp: hLtp,
+              holding_pnl: (typeof hQty==='number' && typeof hAvg==='number' && typeof hLtp==='number') ? ((hLtp - hAvg) * hQty) : null,
+              holding_pnl_pct: num(h.holding_pnl_pct),
+              position_qty: posQty,
+              position_avg: posAvg,
+              position_pnl_day: posDayPnl,
+              active_orders: activeBySym[s]||0
+            });
+          });
+          // Compute total Positional PnL across rows
+          // Totals are shown in the table summary row; header summary removed.
+          renderOrdersSnapshot(rows);
+        }catch(e){
+          const tbody = document.querySelector('#orders-snapshot tbody');
+          if (tbody) tbody.innerHTML = `<tr><td colspan="9" class="muted">${e.message}</td></tr>`;
+          // Header summary removed; nothing to clear here.
+        }
+      }
+  // Snapshot sort state and header sorting
+  let sortStateSnapshot = { key: 'symbol', dir: 'asc' };
+  attachSortingFor('orders-snapshot', sortStateSnapshot, ()=> fetchOrdersSnapshot());
+
+      function renderOrdersSnapshot(rows){
+        const tbody = document.querySelector('#orders-snapshot tbody');
+        tbody.innerHTML = '';
+        // Compute combined for sorting if needed
+        rows.forEach(r=>{ r.combined_pnl = ((typeof r.position_pnl_day==='number'? r.position_pnl_day:0) + (typeof r.holding_pnl==='number'? r.holding_pnl:0)); });
+        // Apply header-based sort
+        const key = sortStateSnapshot.key;
+        const dir = sortStateSnapshot.dir;
+        const filtered = rows.slice();
+        filtered.sort((a,b)=>{
+          const va = a[key];
+          const vb = b[key];
+          if (va == null && vb == null) return 0;
+          if (va == null) return 1;
+          if (vb == null) return -1;
+          if (typeof va === 'number' && typeof vb === 'number') return dir==='asc'? va - vb : vb - va;
+          return dir==='asc'? String(va).localeCompare(String(vb)) : String(vb).localeCompare(String(va));
+        });
+        let sumPosPnl = 0;
+        let sumHoldPnl = 0;
+        for(const r of filtered){
+          const combined = (typeof r.position_pnl_day==='number'? r.position_pnl_day:0) + (typeof r.holding_pnl==='number'? r.holding_pnl:0);
+          const tr = document.createElement('tr');
+          tr.innerHTML = `
+            <td>${r.symbol||''}</td>
+            <td>${fmtPrice(r.total_holdings)}</td>
+            <td>${fmtPrice(r.holding_ltp)}</td>
+            <td>${fmtMaybe(r.holding_qty)}</td>
+            <td>${fmtPrice(r.holding_avg)}</td>
+            <td><span class="num" style="${pnlColor(r.holding_pnl)}">${fmtPrice(r.holding_pnl)}</span></td>
+            <td>${fmtPrice(r.position_avg)}</td>
+            <td>${fmtMaybe(r.position_qty)}</td>
+            <td><span class="num" style="${pnlColor(r.position_pnl_day)}">${fmtPrice(r.position_pnl_day)}</span></td>
+            <td>${r.active_orders||0}</td>
+            <td><span class="num" style="${pnlColor(combined)}">${fmtPrice(combined)}</span></td>
+          `;
+          tbody.appendChild(tr);
+          if (typeof r.position_pnl_day === 'number' && !Number.isNaN(r.position_pnl_day)) sumPosPnl += r.position_pnl_day;
+          if (typeof r.holding_pnl === 'number' && !Number.isNaN(r.holding_pnl)) sumHoldPnl += r.holding_pnl;
+        }
+        // summary row
+        const sumTr = document.createElement('tr');
+        const color = (sumPosPnl + sumHoldPnl) >= 0 ? 'hsl(120,70%,38%)' : 'hsl(0,70%,38%)';
+        sumTr.innerHTML = `
+          <td colspan="9" style="text-align:right; font-weight:600;">Total Pos PnL / Hold PnL / Combined PnL:</td>
+          <td style="font-weight:600; color:${color};">${fmtPrice(sumPosPnl)} / ${fmtPrice(sumHoldPnl)} / ${fmtPrice(sumPosPnl + sumHoldPnl)}</td>
+        `;
+        tbody.appendChild(sumTr);
+      }
     </script>
   </body>
 </html>

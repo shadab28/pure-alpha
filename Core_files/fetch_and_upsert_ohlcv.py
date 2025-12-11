@@ -205,10 +205,11 @@ def upsert_rows(cur, rows, symbol, timeframe):
 def main():
     # Load environment variables from local .env files early
     load_local_env()
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description='Fetch OHLCV from Kite and upsert to Postgres (supports 15m and 1d). Use --daily or --timeframes 1d for daily candles.')
     parser.add_argument('--days', type=int, default=200)
     parser.add_argument('--rows', type=int, default=None, help='Approx number of rows per symbol to fetch (overrides --days if set)')
     parser.add_argument('--timeframes', type=str, default=None, help='Comma-separated list of timeframes (e.g. 15m,1d). If omitted, uses param.yaml timeframe.')
+    parser.add_argument('--daily', action='store_true', help='Fetch only 1d timeframe (daily) for the given --days')
     parser.add_argument('--workers', type=int, default=4, help='Number of parallel worker threads for symbols')
     parser.add_argument('--since-now', action='store_true', help='Compute from time relative to now to fetch the most recent rows')
     args = parser.parse_args()
@@ -232,7 +233,9 @@ def main():
             return '1d', 'day'
         raise ValueError("Only '15m' and '1d' timeframes are supported")
 
-    if args.timeframes:
+    if args.daily:
+        pairs = [('1d', 'day')]
+    elif args.timeframes:
         pairs = [normalize_tf_strict(x) for x in args.timeframes.split(',') if x.strip()]
     else:
         raw_tf = params.get('timeframe', '15minute')
@@ -276,10 +279,36 @@ def main():
     to_date = datetime.utcnow().date()
     from_date = to_date - timedelta(days=args.days)
 
+    # Preflight: ensure table and unique index exist once to avoid duplicate index creation by workers
+    try:
+        with pg_cursor(dict_rows=False) as (cur, _):
+            cur.execute(
+                "CREATE TABLE IF NOT EXISTS ohlcv_data ("
+                "stockname TEXT NOT NULL, timeframe TEXT NOT NULL, candle_stock TIMESTAMP WITHOUT TIME ZONE NOT NULL, "
+                "open NUMERIC, high NUMERIC, low NUMERIC, close NUMERIC, volume BIGINT DEFAULT 0, "
+                "PRIMARY KEY (stockname, timeframe, candle_stock) )"
+            )
+            cur.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uniq_ohlcv_stockname_timeframe_candle_stock ON ohlcv_data(stockname, timeframe, candle_stock)"
+            )
+    except Exception as e:
+        print('Preflight DB setup failed:', e)
+        return
+
     # We'll parallelize symbol processing to speed up the run. Each worker will open its own DB connection.
     print('Downloading instruments list (this may take a while)')
     instruments = kite.instruments()
-    token_map = {inst.get('tradingsymbol'): inst.get('instrument_token') for inst in instruments}
+    # Prefer NSE tokens when duplicates exist across exchanges
+    token_map = {}
+    for inst in instruments:
+        tsym = inst.get('tradingsymbol')
+        tok = inst.get('instrument_token')
+        exch = (inst.get('exchange') or '').upper()
+        if not tsym or tok is None:
+            continue
+        prev = token_map.get(tsym)
+        if prev is None or exch == 'NSE':
+            token_map[tsym] = tok
 
     api_semaphore = threading.Semaphore(2)  # limit concurrent Kite API calls
 
@@ -302,9 +331,9 @@ def main():
             # Ensure table exists (simple create if not exists)
             create_sql = (
                 "CREATE TABLE IF NOT EXISTS ohlcv_data ("
-                "symbol TEXT NOT NULL, timeframe TEXT NOT NULL, ts TIMESTAMP NOT NULL, "
-                "open NUMERIC, high NUMERIC, low NUMERIC, close NUMERIC, volume BIGINT, "
-                "PRIMARY KEY (symbol, timeframe, ts) )"
+                "stockname TEXT NOT NULL, timeframe TEXT NOT NULL, candle_stock TIMESTAMP WITHOUT TIME ZONE NOT NULL, "
+                "open NUMERIC, high NUMERIC, low NUMERIC, close NUMERIC, volume BIGINT DEFAULT 0, "
+                "PRIMARY KEY (stockname, timeframe, candle_stock) )"
             )
             cur.execute(create_sql)
 
@@ -312,6 +341,7 @@ def main():
             if not instr:
                 return f'Instrument token not found for {s}'
 
+            print(f"Timeframes to fetch: {timeframe_labels}")
             for label, kite_tf in zip(timeframe_labels, kite_timeframes):
                 # target rows
                 target = args.rows or args.days
@@ -361,7 +391,7 @@ def main():
 
     # Run ThreadPoolExecutor over symbols
     # Force worker threads to 4 regardless of CLI
-    workers = min(4, len(symbols))
+    workers = min(8, len(symbols))
     print(f'Starting {workers} worker threads for {len(symbols)} symbols')
     results = []
     with ThreadPoolExecutor(max_workers=workers) as ex:
