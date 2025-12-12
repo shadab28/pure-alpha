@@ -61,7 +61,6 @@
   <button id="tab-main" class="btn secondary">All</button>
   <button id="tab-filtered" class="btn secondary">Filtered</button>
   <button id="tab-orders" class="btn secondary">Orders</button>
-  <button id="tab-active" class="btn secondary">Active Orderbook</button>
     </div>
 
     <!-- Main view -->
@@ -156,47 +155,6 @@
         </table>
       </div>
     </div>
-    <!-- Active Orderbook view -->
-    <div id="view-active" class="card" style="display:none; margin-top:14px;">
-      <div class="card-header" style="display:flex;align-items:center;justify-content:space-between;">
-        <span>Active Orderbook (Broker) & GTTs</span>
-        <div style="display:flex; gap:10px; align-items:center;">
-          <button class="btn secondary" id="btn-refresh-active">Refresh</button>
-        </div>
-      </div>
-      <div class="card-body">
-        <div style="margin-bottom:10px; font-weight:600;">Active Orders</div>
-        <table id="active-orders-table">
-          <thead>
-            <tr>
-              <th>Symbol</th>
-              <th>Order ID</th>
-              <th>Qty</th>
-              <th>Price</th>
-              <th>Status</th>
-              <th>Type</th>
-              <th>Actions</th>
-            </tr>
-          </thead>
-          <tbody></tbody>
-        </table>
-        <div style="height:12px"></div>
-        <div style="margin-bottom:10px; font-weight:600;">GTT Orders</div>
-        <table id="active-gtt-table">
-          <thead>
-            <tr>
-              <th>Symbol</th>
-              <th>GTT ID</th>
-              <th>Trigger</th>
-              <th>Type</th>
-              <th>Status</th>
-              <th>Actions</th>
-            </tr>
-          </thead>
-          <tbody></tbody>
-        </table>
-      </div>
-    </div>
 
     <!-- Orders view -->
     <div id="view-orders" class="card" style="display:none; margin-top:14px;">
@@ -223,9 +181,8 @@
               <th data-key="gtt_target_pct_from_ltp">Target % from LTP</th>
               <th data-key="pnl">PnL (₹)</th>
               <th data-key="pnl_pct">PnL %</th>
-        <th data-key="order_id">Order ID</th>
-        <th data-key="gtt_id">GTT ID</th>
-        <th data-key="actions">Actions</th>
+              <th data-key="order_id">Order ID</th>
+              <th data-key="gtt_id">GTT ID</th>
       <th data-key="total_pnl">Total PnL (₹)</th>
             </tr>
           </thead>
@@ -245,18 +202,15 @@
           <thead>
             <tr>
               <th data-key="symbol">Symbol</th>
-              <th data-key="total_holdings">Total Holdings (₹) | Pos Qty</th>
-              <th data-key="total_amount">Total Amount (₹)</th>
+              <th data-key="total_holdings">Total Holding Amount (₹)</th>
+              <th data-key="holding_ltp">LTP</th>
+              <th data-key="holding_avg">Holding Avg (₹)</th>
               <th data-key="holding_qty">Holding Qty</th>
-              <th data-key="holding_avg">Holding Avg</th>
-              <th data-key="holding_ltp">Holding LTP</th>
-              <th data-key="holding_pnl">Holding PnL</th>
-              <th data-key="position_qty">Position Qty (net)</th>
-              <th data-key="position_pnl_day">Position PnL (day)</th>
+              <th data-key="holding_pnl">PnL Holding (₹)</th>
+              <th data-key="position_avg">Position Avg (₹)</th>
+              <th data-key="position_qty">Position Qty</th>
+              <th data-key="position_pnl_day">PnL Position (₹)</th>
               <th data-key="active_orders">Active Orders</th>
-              <th data-key="trades_count">Trades (count)</th>
-              <th data-key="gtt_count">GTT (count)</th>
-              <th data-key="gtt_triggers">GTT Triggers</th>
               <th data-key="combined_pnl">Combined PnL (₹)</th>
             </tr>
           </thead>
@@ -468,24 +422,12 @@
         tabOrders.classList.remove('secondary');
         tabMain.classList.add('secondary');
         tabFiltered.classList.add('secondary');
-        fetchOrders();
+  ensureOrdersEvents();
+  fetchOrders();
         }
       tabMain.addEventListener('click', ()=> setActiveTab('main'));
       tabFiltered.addEventListener('click', ()=> setActiveTab('filtered'));
       tabOrders.addEventListener('click', ()=> setOrdersTab());
-      const tabActive = document.getElementById('tab-active');
-      function setActiveOrderbookTab(){
-        document.getElementById('view-main').style.display='none';
-        document.getElementById('view-filtered').style.display='none';
-        document.getElementById('view-orders').style.display='none';
-        document.getElementById('view-active').style.display='block';
-        tabActive.classList.remove('secondary');
-        tabMain.classList.add('secondary');
-        tabFiltered.classList.add('secondary');
-        tabOrders.classList.add('secondary');
-        fetchActiveOrderbook();
-      }
-      if (tabActive) tabActive.addEventListener('click', () => setActiveOrderbookTab());
 
   // Filters handlers
       document.getElementById('apply-filters').addEventListener('click', ()=> renderFilteredTable());
@@ -589,10 +531,6 @@
             <td><span class="num" style="${pnlColor(r.pnl)}">${fmtPct(r.pnl_pct)}</span></td>
             <td>${r.order_id||''}</td>
             <td>${r.gtt_id||''}</td>
-            <td>
-              ${r.order_id? `<button class="btn small" onclick="cancelOrder('${r.order_id}', this)">Cancel</button>` : ''}
-              ${r.gtt_id? `<button class="btn small secondary" onclick="cancelGTT('${r.gtt_id}', '${r.symbol}', this)" style="margin-left:6px;">Cancel GTT</button>` : ''}
-            </td>
             <td><span class="num" style="${pnlColor(r.pnl)}">${fmtPrice(r.pnl)}</span></td>
           `;
           tbody.appendChild(tr);
@@ -612,106 +550,46 @@
       }
 
       document.getElementById('btn-refresh-orders').addEventListener('click', fetchOrders);
-      setInterval(()=>{
-        if (document.getElementById('view-orders').style.display==='block') fetchOrders();
-      }, 5000);
-
-      // Active orderbook logic (broker active orders + GTTs)
-      async function fetchActiveOrderbook(){
+      // Server-Sent Events for orders; remove 5s polling
+      let ordersES = null;
+      function ensureOrdersEvents(){
+        if (ordersES) return;
         try{
-          const [obRes, gttRes] = await Promise.all([fetch('/api/orderbook'), fetch('/api/gtt')]);
-          const obJson = await obRes.json();
-          const gttJson = await gttRes.json();
-          if (!obRes.ok) throw new Error(obJson.error || 'Orderbook fetch failed');
-          if (!gttRes.ok) throw new Error(gttJson.error || 'GTT fetch failed');
-          renderActiveOrders(obJson.orders || []);
-          renderActiveGTTs(gttJson.gtts || gttJson || []);
-        }catch(e){
-          const tbody = document.querySelector('#active-orders-table tbody'); if (tbody) tbody.innerHTML = `<tr><td colspan="7" class="muted">${e.message}</td></tr>`;
-          const gtbody = document.querySelector('#active-gtt-table tbody'); if (gtbody) gtbody.innerHTML = `<tr><td colspan="6" class="muted">${e.message}</td></tr>`;
-        }
-      }
-
-      function renderActiveOrders(orders){
-        const tbody = document.querySelector('#active-orders-table tbody'); tbody.innerHTML = '';
-        if (!orders || orders.length===0){ tbody.innerHTML = '<tr><td colspan="7" class="muted">No active orders</td></tr>'; return; }
-        for (const o of orders){
-          const tr = document.createElement('tr');
-          const sym = o.tradingsymbol || o.symbol || o.instrument_token || '';
-          tr.innerHTML = `
-            <td>${sym}</td>
-            <td>${o.order_id||o.orderId||''}</td>
-            <td>${o.quantity||o.qty||o.pending_qty||''}</td>
-            <td>${o.price||o.avg_price||''}</td>
-            <td>${o.status||''}</td>
-            <td>${o.order_type||o.type||''}</td>
-            <td>
-              ${o.order_id? `<button class="btn small" onclick="cancelOrder('${o.order_id}', this)">Cancel</button>` : ''}
-            </td>
-          `;
-          tbody.appendChild(tr);
-        }
-      }
-
-      function renderActiveGTTs(gtts){
-        const tbody = document.querySelector('#active-gtt-table tbody'); tbody.innerHTML = '';
-        if (!gtts || Object.keys(gtts).length===0){ tbody.innerHTML = '<tr><td colspan="6" class="muted">No GTT orders</td></tr>'; return; }
-        // gtts may be array or object keyed by id/symbol
-        const list = Array.isArray(gtts) ? gtts : (gtts.gtts || Object.values(gtts));
-        if (!list || list.length===0){ tbody.innerHTML = '<tr><td colspan="6" class="muted">No GTT orders</td></tr>'; return; }
-        for (const g of list){
-          const sym = g.symbol || g.tradingsymbol || (g.trigger && g.trigger.tradingsymbol) || '';
-          const gid = g.id || g.gtt_id || g.gttId || g.trigger_id || '';
-          const trigger = (g.trigger && (g.trigger.trigger_values || g.trigger.trigger_price)) || g.trigger_values || g.trigger_price || '';
-          const typ = g.type || g.order_type || (g.trigger && g.trigger.type) || '';
-          const status = g.status || g.state || '';
-          const tr = document.createElement('tr');
-          tr.innerHTML = `
-            <td>${sym}</td>
-            <td>${gid}</td>
-            <td>${Array.isArray(trigger)? trigger.join('/') : trigger}</td>
-            <td>${typ}</td>
-            <td>${status}</td>
-            <td>${gid? `<button class="btn small secondary" onclick="cancelGTT('${gid}','${sym}', this)">Cancel GTT</button>` : ''}</td>
-          `;
-          tbody.appendChild(tr);
-        }
-      }
-
-      document.getElementById('btn-refresh-active').addEventListener('click', fetchActiveOrderbook);
-      setInterval(()=>{ if (document.getElementById('view-active').style.display==='block') fetchActiveOrderbook(); }, 5000);
-
-      // Cancel order/GTT handlers
-      async function cancelOrder(orderId, btn){
-        try{
-          if (!orderId) return;
-          if (!confirm(`Cancel order ${orderId}?`)) return;
-          if (btn) { btn.disabled = true; btn.textContent = 'Cancelling…'; }
-          const res = await fetch('/api/order/cancel', {
-            method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({order_id: orderId})
-          });
-          const j = await res.json();
-          if (!res.ok) throw new Error(j.error || 'Cancel failed');
-          alert(`Cancelled order ${orderId}`);
-          fetchOrders();
-        }catch(e){
-          alert(`Cancel error: ${e.message||e}`);
-        }finally{ if (btn){ btn.disabled = false; btn.textContent = 'Cancel'; } }
-      }
-
-      async function cancelGTT(gttId, symbol, btn){
-        try{
-          if (!gttId) return;
-          if (!confirm(`Cancel GTT ${gttId} for ${symbol || ''}?`)) return;
-          if (btn) { btn.disabled = true; btn.textContent = 'Cancelling…'; }
-          const res = await fetch('/api/gtt/cancel', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({gtt_id: gttId}) });
-          const j = await res.json();
-          if (!res.ok) throw new Error(j.error || 'GTT cancel failed');
-          alert(`Cancelled GTT ${gttId}`);
-          fetchOrders();
-        }catch(e){
-          alert(`Cancel GTT error: ${e.message||e}`);
-        }finally{ if (btn){ btn.disabled = false; btn.textContent = 'Cancel GTT'; } }
+          ordersES = new EventSource('/events/orders');
+          ordersES.onmessage = (ev)=>{
+            try{
+              const msg = JSON.parse(ev.data);
+              if (msg.type === 'snapshot'){
+                latestOrders = (msg.orders||[]).map(o=>({
+                  order_id: o.order_id || o.id,
+                  symbol: o.tradingsymbol || o.symbol,
+                  quantity: o.quantity,
+                  status: o.status,
+                  avg_price: (typeof o.average_price==='number')? o.average_price : (o.average_price? Number(o.average_price): null)
+                }));
+                renderOrdersTable();
+                fetchOrdersSnapshot();
+              } else if (msg.type === 'order_update'){
+                const o = msg.order||{};
+                const oid = String(o.order_id||o.id||'');
+                if (oid){
+                  const idx = latestOrders.findIndex(x=> String(x.order_id)===oid);
+                  const updated = {
+                    order_id: oid,
+                    symbol: o.tradingsymbol||o.symbol,
+                    quantity: o.quantity,
+                    status: o.status,
+                    avg_price: (typeof o.average_price==='number')? o.average_price : (o.average_price? Number(o.average_price): null)
+                  };
+                  if (idx>=0) latestOrders[idx] = { ...latestOrders[idx], ...updated };
+                  else latestOrders.push(updated);
+                  renderOrdersTable();
+                  fetchOrdersSnapshot();
+                }
+              }
+            }catch(e){ /* ignore parse errors */ }
+          };
+        }catch(e){ /* ignore SSE errors */ }
       }
 
       // ---------- Consolidated snapshot (holdings/positions/orderbook/trades/gtt) ----------
@@ -744,34 +622,32 @@
             const h = holdings[s]||{};
             const p = posNet[s]||{};
             const g = gttBySymbol[s]||{ count:0, items:[] };
-            // Prefer server-calculated totals which may include T+1/pending quantities
-            const hQty = (typeof h.total_quantity === 'number') ? num(h.total_quantity) : num(h.quantity);
+            const hQty = num(h.quantity);
             const hAvg = num(h.average_price||h.average);
             const hLtp = num(h.last_price);
             const holdPnl = num(h.holding_pnl);
-            const t1Qty = (typeof h.t1_quantity === 'number') ? num(h.t1_quantity) : 0;
             const posQty = num(p.quantity);
+            const posAvg = num(p.average_price||p.avg_price||p.price);
             const posDayPnl = num(p.pnl||p.day_pnl||p.m2m);
-            // Use server-provided totals if available, else compute client-side
-            const totalAmount = (h.total_amount != null) ? num(h.total_amount) : ((typeof hQty==='number' && typeof hLtp==='number') ? (hQty * hLtp) : null);
-            const totalHoldings = (h.total_holdings_amount != null) ? num(h.total_holdings_amount) : ((typeof hQty==='number' && typeof hAvg==='number') ? (hQty * hAvg) : null);
+            const totalAmount = (typeof hQty==='number' && typeof hLtp==='number') ? (hQty * hLtp) : null;
+            const totalHoldings = (typeof hQty==='number' && typeof hAvg==='number') ? (hQty * hAvg) : null;
+            const totalHoldingsCombined = (
+              (typeof hQty==='number' && typeof hAvg==='number' ? (hQty*hAvg) : 0) +
+              (typeof posQty==='number' && typeof posAvg==='number' ? (posQty*posAvg) : 0)
+            );
             const totalStockPnl = ((typeof holdPnl==='number'? holdPnl:0) + (typeof posDayPnl==='number'? posDayPnl:0));
             rows.push({
               symbol: s,
               total_holdings: totalHoldings,
-              total_amount: totalAmount,
               holding_qty: hQty,
               holding_avg: hAvg,
               holding_ltp: hLtp,
-              holding_pnl: holdPnl, // show holdings-only PnL (exclude position day PnL)
+              holding_pnl: (typeof hQty==='number' && typeof hAvg==='number' && typeof hLtp==='number') ? ((hLtp - hAvg) * hQty) : null,
               holding_pnl_pct: num(h.holding_pnl_pct),
-              t1_quantity: t1Qty,
               position_qty: posQty,
+              position_avg: posAvg,
               position_pnl_day: posDayPnl,
-              active_orders: activeBySym[s]||0,
-              trades_count: tradesBySym[s]||0,
-              gtt_count: g.count||0,
-              gtt_triggers: (g.items||[]).map(it=> (Array.isArray(it.trigger_values)? it.trigger_values.join('/') : '') ).join(', ')
+              active_orders: activeBySym[s]||0
             });
           });
           // Compute total Positional PnL across rows
@@ -805,55 +681,36 @@
           if (typeof va === 'number' && typeof vb === 'number') return dir==='asc'? va - vb : vb - va;
           return dir==='asc'? String(va).localeCompare(String(vb)) : String(vb).localeCompare(String(va));
         });
-  let sum = 0;
-  let sumHold = 0;
-  let sumTotalAmount = 0;
-  let sumTotalHoldings = 0;
+        let sumPosPnl = 0;
+        let sumHoldPnl = 0;
         for(const r of filtered){
           const combined = (typeof r.position_pnl_day==='number'? r.position_pnl_day:0) + (typeof r.holding_pnl==='number'? r.holding_pnl:0);
           const tr = document.createElement('tr');
           tr.innerHTML = `
             <td>${r.symbol||''}</td>
-            <td>${fmtPrice(r.total_holdings)}${(typeof r.t1_quantity==='number' && r.t1_quantity>0)? ` <span class="muted">| T+1: ${r.t1_quantity}</span>` : ''}</td>
-            <td>${fmtPrice(r.total_amount)}</td>
+            <td>${fmtPrice(r.total_holdings)}</td>
+            <td>${fmtPrice(r.holding_ltp)}</td>
             <td>${fmtMaybe(r.holding_qty)}</td>
             <td>${fmtPrice(r.holding_avg)}</td>
-            <td>${fmtPrice(r.holding_ltp)}</td>
             <td><span class="num" style="${pnlColor(r.holding_pnl)}">${fmtPrice(r.holding_pnl)}</span></td>
+            <td>${fmtPrice(r.position_avg)}</td>
             <td>${fmtMaybe(r.position_qty)}</td>
             <td><span class="num" style="${pnlColor(r.position_pnl_day)}">${fmtPrice(r.position_pnl_day)}</span></td>
             <td>${r.active_orders||0}</td>
-            <td>${r.trades_count||0}</td>
-            <td>${r.gtt_count||0}</td>
-            <td>${r.gtt_triggers||''}</td>
             <td><span class="num" style="${pnlColor(combined)}">${fmtPrice(combined)}</span></td>
           `;
           tbody.appendChild(tr);
-          if (typeof r.position_pnl_day === 'number' && !Number.isNaN(r.position_pnl_day)) sum += r.position_pnl_day;
-          // holding_pnl now represents total PnL for the stock; for totals, still show split:
-          const holdOnly = (typeof r.holding_qty==='number' && typeof r.holding_avg==='number' && typeof r.holding_ltp==='number')
-            ? ((r.holding_ltp - r.holding_avg) * r.holding_qty) : null;
-          if (typeof holdOnly === 'number' && !Number.isNaN(holdOnly)) sumHold += holdOnly;
-          if (typeof r.total_amount === 'number' && !Number.isNaN(r.total_amount)) sumTotalAmount += r.total_amount;
-          if (typeof r.total_holdings === 'number' && !Number.isNaN(r.total_holdings)) sumTotalHoldings += r.total_holdings;
+          if (typeof r.position_pnl_day === 'number' && !Number.isNaN(r.position_pnl_day)) sumPosPnl += r.position_pnl_day;
+          if (typeof r.holding_pnl === 'number' && !Number.isNaN(r.holding_pnl)) sumHoldPnl += r.holding_pnl;
         }
-        // Separator row
-        const sepTr = document.createElement('tr');
-        sepTr.innerHTML = '<td colspan="14" style="height:6px; background:transparent"></td>';
-        tbody.appendChild(sepTr);
-        // Totals row: create per-column totals so numbers appear under their columns
-        const totalsTr = document.createElement('tr');
-        const totalColor = (sum + sumHold) >= 0 ? 'hsl(120,70%,38%)' : 'hsl(0,70%,38%)';
-        // Build 14 cells aligning with table columns
-        const cells = new Array(14).fill('');
-        // Column indexes (0-based): 1=total_holdings,2=total_amount,6=holding_pnl,8=position_pnl_day,13=combined_pnl
-        cells[1] = `<span class="num" style="font-weight:600; color:${totalColor};">${fmtPrice(sumTotalHoldings)}</span>`;
-        cells[2] = `<span class="num" style="font-weight:600; color:${totalColor};">${fmtPrice(sumTotalAmount)}</span>`;
-        cells[6] = `<span class="num" style="font-weight:600; color:${totalColor};">${fmtPrice(sumHold)}</span>`;
-        cells[8] = `<span class="num" style="font-weight:600; color:${totalColor};">${fmtPrice(sum)}</span>`;
-        cells[13] = `<span class="num" style="font-weight:600; color:${totalColor};">${fmtPrice(sum + sumHold)}</span>`;
-        totalsTr.innerHTML = cells.map(c=>`<td>${c}</td>`).join('');
-        tbody.appendChild(totalsTr);
+        // summary row
+        const sumTr = document.createElement('tr');
+        const color = (sumPosPnl + sumHoldPnl) >= 0 ? 'hsl(120,70%,38%)' : 'hsl(0,70%,38%)';
+        sumTr.innerHTML = `
+          <td colspan="9" style="text-align:right; font-weight:600;">Total Pos PnL / Hold PnL / Combined PnL:</td>
+          <td style="font-weight:600; color:${color};">${fmtPrice(sumPosPnl)} / ${fmtPrice(sumHoldPnl)} / ${fmtPrice(sumPosPnl + sumHoldPnl)}</td>
+        `;
+        tbody.appendChild(sumTr);
       }
     </script>
   </body>

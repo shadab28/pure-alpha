@@ -74,37 +74,6 @@ _gtt_cache: dict[str, list] = {}
 _gtt_cache_ts: float = 0.0
 _order_event_queues: list = []
 
-
-def _fetch_gtts_with_timeout(kite, timeout=2.0):
-	"""Attempt to fetch GTTs from kite but return quickly using a thread timeout.
-
-	If fetch doesn't complete within `timeout` seconds, return cached _gtt_cache flattened.
-	"""
-	import threading
-	result = {}
-	def worker():
-		try:
-			if hasattr(kite, 'get_gtts'):
-				res = kite.get_gtts() or []
-			elif hasattr(kite, 'get_gtt'):
-				res = [kite.get_gtt()] or []
-			else:
-				res = []
-			result['v'] = res
-		except Exception:
-			result['v'] = []
-
-	th = threading.Thread(target=worker, daemon=True)
-	th.start()
-	th.join(timeout)
-	if 'v' in result:
-		return result['v']
-	# timeout -> return flattened cache
-	tmp = []
-	for arr in _gtt_cache.values():
-		tmp.extend(arr)
-	return tmp
-
 def _ensure_order_listener():
 	"""Start Kite Ticker to listen for order updates and keep a local cache."""
 	try:
@@ -248,7 +217,8 @@ def api_gtt_recreate():
 		# current gtt book
 		gtts = []
 		try:
-			gtts = _fetch_gtts_with_timeout(kite, timeout=2.0) or []
+			if hasattr(kite, 'gtt'):
+				gtts = kite.gtt() or []
 		except Exception as ge:
 			error_logger.error("gtt() failed: %s", ge)
 			gtts = []
@@ -359,10 +329,11 @@ def api_trades():
 		except Exception as te:
 			error_logger.error("trades() failed: %s", te)
 			trades = []
-		# Fetch GTTs to correlate stops/targets if needed (non-blocking)
+		# Fetch GTTs to correlate stops/targets if needed
 		gtts = []
 		try:
-			gtts = _fetch_gtts_with_timeout(kite, timeout=2.0) or []
+			if hasattr(kite, 'gtt'):
+				gtts = kite.gtt() or []
 		except Exception as ge:
 			error_logger.error("gtt() failed: %s", ge)
 			gtts = []
@@ -497,8 +468,8 @@ def api_gtt_list():
 			kite = get_kite()
 			gtts = []
 			try:
-				if hasattr(kite, 'get_gtts'):
-					gtts = kite.get_gtts() or []
+				if hasattr(kite, 'gtt'):
+					gtts = kite.gtt() or []
 			except Exception as ge:
 				error_logger.error("gtt() failed: %s", ge)
 				gtts = []
@@ -848,37 +819,6 @@ def api_place_buy():
 				tmap = _load_tick_sizes(inst_csv)
 				trail_tick = tmap.get(symbol) or _fallback_tick_by_price(ltp)
 				_start_trailing(kite, symbol, qty, sl_pct, ltp=ltp, tick=trail_tick, gtt_id=gtt_id)
-				# Persist computed GTT target/stop immediately so UI can show them
-				try:
-					target_px = _round_to_tick(ltp * (1 + 0.075), trail_tick)
-					stop_px = _round_to_tick(ltp * (1 - sl_pct), trail_tick)
-					target_pct_from_ltp = ((target_px / float(ltp)) - 1.0) * 100.0 if ltp else None
-					stop_pct_from_ltp = (1.0 - (stop_px / float(ltp))) * 100.0 if ltp else None
-					with _orders_lock:
-						# attach to any existing temp record for this order id if present
-						rec = _orders_store.get(str(order_id))
-						if rec is None:
-							# create minimal record
-							_orders_store[str(order_id)] = {
-								"symbol": symbol,
-								"quantity": qty,
-								"limit_price": limit_price,
-								"gtt_id": gtt_id,
-								"gtt_target_price": target_px,
-								"gtt_target_pct_from_ltp": target_pct_from_ltp,
-								"gtt_stop_price": stop_px,
-								"gtt_stop_pct_from_ltp": stop_pct_from_ltp,
-								"ts": int(time.time()),
-							}
-						else:
-							rec['gtt_id'] = gtt_id
-							rec['gtt_target_price'] = target_px
-							rec['gtt_target_pct_from_ltp'] = target_pct_from_ltp
-							rec['gtt_stop_price'] = stop_px
-							rec['gtt_stop_pct_from_ltp'] = stop_pct_from_ltp
-				except Exception:
-					# non-fatal: continue
-					pass
 			except Exception as ge:
 				order_logger.error("ORDER_GTT_FAIL symbol=%s qty=%s sl_pct=%.3f err=%s", symbol, qty, sl_pct, ge)
 				# Don't fail the buy if GTT fails; return both
@@ -956,14 +896,17 @@ def api_orders():
 		now = time.time()
 		try:
 			if now - _gtt_cache_ts > 30:
-				gtt_list = _fetch_gtts_with_timeout(kite, timeout=2.0) or []
-				_gtt_cache = {}
-				for g in gtt_list:
-					ts = g.get('tradingsymbol') or g.get('symbol')
-					if not ts:
-						continue
-					_gtt_cache.setdefault(ts, []).append(g)
-				_gtt_cache_ts = now
+				if hasattr(kite, 'gtt'):
+					gtt_list = kite.gtt() or []
+					_gtt_cache = {}
+					for g in gtt_list:
+						ts = g.get('tradingsymbol') or g.get('symbol')
+						if not ts:
+							continue
+						_gtt_cache.setdefault(ts, []).append(g)
+					_gtt_cache_ts = now
+				else:
+					gtt_list = []
 			else:
 				# flatten cached gtt map
 				tmp = []
@@ -1113,30 +1056,6 @@ def api_orders():
 				stop_pct_from_ltp = None
 				target_pct_from_ltp = None
 
-			# Prefer persisted gtt values from our local store if broker didn't supply them
-			try:
-				if (target_price is None or not isinstance(target_price, (int,float))) and rec.get('gtt_target_price') is not None:
-					tmp = rec.get('gtt_target_price')
-					if isinstance(tmp, (int,float)):
-						target_price = float(tmp)
-			except Exception:
-				pass
-			try:
-				if (stop_price is None or not isinstance(stop_price, (int,float))) and rec.get('gtt_stop_price') is not None:
-					tmp2 = rec.get('gtt_stop_price')
-					if isinstance(tmp2, (int,float)):
-						stop_price = float(tmp2)
-			except Exception:
-				pass
-			# recompute percent fields if LTP available
-			try:
-				if isinstance(ltp, (int,float)) and ltp>0:
-					if isinstance(target_price, (int,float)):
-						target_pct_from_ltp = ((target_price/float(ltp)) - 1.0) * 100.0
-					if isinstance(stop_price, (int,float)):
-						stop_pct_from_ltp = (1.0 - (stop_price/float(ltp))) * 100.0
-			except Exception:
-				pass
 			resp.append({
 				"order_id": oid,
 				"symbol": symbol,
@@ -1159,80 +1078,6 @@ def api_orders():
 	except Exception as e:
 		error_logger.exception("/api/orders failed: %s", e)
 		return jsonify({"error": str(e)}), 500
-
-
-	@app.post('/api/order/cancel')
-	def api_cancel_order():
-		"""Cancel a broker order by order_id (JSON body: {"order_id": "..."})."""
-		try:
-			access_logger.info("POST /api/order/cancel from %s", request.remote_addr)
-			payload = request.get_json(silent=True) or {}
-			order_id = str(payload.get('order_id') or payload.get('orderId') or '').strip()
-			if not order_id:
-				return jsonify({"error": "order_id is required"}), 400
-			kite = get_kite()
-			# Try common cancel API names on the kite client
-			try:
-				if hasattr(kite, 'cancel_order'):
-					# Many kite wrappers accept (order_id=...)
-					try:
-						res = kite.cancel_order(order_id=order_id)
-					except TypeError:
-						# fallback signature
-						res = kite.cancel_order(variety=getattr(kite, 'VARIETY_REGULAR', 'regular'), order_id=order_id)
-				else:
-					return jsonify({"error": "cancel_order not supported by kite client"}), 501
-			except Exception as ce:
-				error_logger.error("cancel_order failed for %s: %s", order_id, ce)
-				return jsonify({"error": str(ce)}), 500
-			# Remove from local stores if present
-			with _orders_lock:
-				_orders_store.pop(str(order_id), None)
-			with _broker_orders_lock:
-				_broker_orders_cache.pop(str(order_id), None)
-			return jsonify({"status": "ok", "order_id": order_id, "result": res})
-		except Exception as e:
-			error_logger.exception("/api/order/cancel failed: %s", e)
-			return jsonify({"error": str(e)}), 500
-
-
-	@app.post('/api/gtt/cancel')
-	def api_cancel_gtt():
-		"""Cancel/delete a GTT by trigger id (JSON body: {"gtt_id": "..."})."""
-		try:
-			access_logger.info("POST /api/gtt/cancel from %s", request.remote_addr)
-			payload = request.get_json(silent=True) or {}
-			gtt_id = payload.get('gtt_id') or payload.get('trigger_id') or payload.get('id')
-			if gtt_id is None:
-				return jsonify({"error": "gtt_id is required"}), 400
-			kite = get_kite()
-			try:
-				# prefer delete_gtt if available
-				if hasattr(kite, 'delete_gtt'):
-					res = kite.delete_gtt(gtt_id)
-				elif hasattr(kite, 'cancel_gtt'):
-					res = kite.cancel_gtt(gtt_id)
-				else:
-					return jsonify({"error": "GTT delete not supported by kite client"}), 501
-			except Exception as ge:
-				error_logger.error("gtt cancel failed for %s: %s", gtt_id, ge)
-				return jsonify({"error": str(ge)}), 500
-			# Remove from cached GTTs if present
-			try:
-				with _broker_orders_lock:
-					# purge any cached entries that reference this id
-					for k, arr in list(_gtt_cache.items()):
-						newarr = [g for g in arr if str(g.get('id') or g.get('trigger_id')) != str(gtt_id)]
-						if newarr:
-							_gtt_cache[k] = newarr
-						else:
-							_gtt_cache.pop(k, None)
-			except Exception:
-				pass
-			return jsonify({"status": "ok", "gtt_id": gtt_id, "result": res})
-		except Exception as e:
-			error_logger.exception("/api/gtt/cancel failed: %s", e)
-			return jsonify({"error": str(e)}), 500
 
 
 if __name__ == "__main__":
