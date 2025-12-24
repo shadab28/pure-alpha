@@ -9,6 +9,7 @@ Responsibilities:
 Public CLI:
         python auth.py [--request-token TOKEN] [--api-key KEY] [--api-secret SECRET]
                                     [--save-env] [--no-interactive]
+new algo
 
 Key functions:
     obtain_access_token_interactive, validate_token, bootstrap_data
