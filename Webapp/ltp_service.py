@@ -55,7 +55,9 @@ _daily_ma_thread_started = False
 _sma15m_cache: Dict[str, float] = {}
 _sma50_15m_cache: Dict[str, float] = {}
 _high200_15m_cache: Dict[str, float] = {}
+_low200_15m_cache: Dict[str, float] = {}
 _last15m_close_cache: Dict[str, float] = {}
+_rsi15m_cache: Dict[str, float] = {}
 _sma15m_last_ts: Optional[datetime] = None
 _sma15m_lock = threading.RLock()
 
@@ -68,6 +70,11 @@ _volratio_lock = threading.RLock()
 _days_since_gc_cache: Dict[str, Optional[int]] = {}
 _days_since_gc_last_ts: Optional[datetime] = None
 _days_since_gc_lock = threading.RLock()
+
+# Support/Resistance cache
+_sr_cache: Dict[str, Dict[str, Any]] = {}
+_sr_last_ts: Optional[datetime] = None
+_sr_lock = threading.RLock()
 
 DAILY_REFRESH_SECONDS = 3600  # recompute daily MAs at most once per hour
 FIFTEEN_MIN_REFRESH_SECONDS = 60  # recompute 15m SMA200 at most once per minute
@@ -154,7 +161,13 @@ def _compute_daily_ma_for_symbol(kite: Any, symbol: str, instrument_token: int):
         return {}
     sma50 = sum(closes_sorted[-50:]) / 50 if len(closes_sorted) >= 50 else None
     sma200 = sum(closes_sorted[-200:]) / 200 if len(closes_sorted) >= 200 else None
-    ratio = round(sma50 / sma200, 2) if (sma50 and sma200 and sma200 != 0) else None 
+    # Use explicit None checks (avoid truthiness) so valid numeric values like 0 are handled.
+    ratio = None
+    if sma50 is not None and sma200 is not None and sma200 != 0:
+        try:
+            ratio = round(sma50 / sma200, 2)
+        except Exception:
+            ratio = None
     return {"sma50": sma50, "sma200": sma200, "ratio": ratio, "updated": datetime.now()}
 
 
@@ -228,13 +241,14 @@ def _refresh_sma15m_if_needed(symbols: List[str]):
             cur.execute(
                 """
                 WITH ranked AS (
-                    SELECT stockname, high,
+                    SELECT stockname, high, low,
                            ROW_NUMBER() OVER (PARTITION BY stockname ORDER BY candle_stock DESC) AS rn
                     FROM ohlcv_data
                     WHERE timeframe='15m'
                 )
                 SELECT stockname,
-                       MAX(CASE WHEN rn <= 200 THEN high END) AS high200_15m
+                       MAX(CASE WHEN rn <= 200 THEN high END) AS high200_15m,
+                       MIN(CASE WHEN rn <= 200 THEN low END) AS low200_15m
                 FROM ranked
                 GROUP BY stockname
                 """
@@ -257,17 +271,64 @@ def _refresh_sma15m_if_needed(symbols: List[str]):
                 _sma15m_cache[stockname] = float(sma200) if sma200 is not None else None
                 _sma50_15m_cache[stockname] = float(sma50) if sma50 is not None else None
             _high200_15m_cache.clear()
-            for stockname, high200 in high_rows:
+            _low200_15m_cache.clear()
+            for stockname, high200, low200 in high_rows:
                 try:
                     _high200_15m_cache[stockname] = float(high200) if high200 is not None else None
                 except Exception:
-                    continue
+                    _high200_15m_cache[stockname] = None
+                try:
+                    _low200_15m_cache[stockname] = float(low200) if low200 is not None else None
+                except Exception:
+                    _low200_15m_cache[stockname] = None
             _last15m_close_cache.clear()
             for stockname, close_val in last_rows:
                 try:
                     _last15m_close_cache[stockname] = float(close_val)
                 except Exception:
                     continue
+            # Optionally compute a simple RSI(14) from recent closes if available in DB
+            try:
+                # Attempt to fetch last 50 closes per symbol to compute RSI(14)
+                with pg_cursor() as (cur, _):
+                    cur.execute(
+                        """
+                        SELECT stockname, array_agg(close ORDER BY candle_stock DESC) AS closes
+                        FROM ohlcv_data
+                        WHERE timeframe='15m'
+                        GROUP BY stockname
+                        """
+                    )
+                    rows_closes = cur.fetchall()
+                _rsi15m_cache.clear()
+                for stockname, closes_arr in rows_closes:
+                    try:
+                        closes = [float(x) for x in (closes_arr or [])][:50]
+                        if len(closes) >= 15:
+                            # closes ordered newest first; reverse to chronological
+                            closes = list(reversed(closes))
+                            # compute RSI(14)
+                            gains = 0.0
+                            losses = 0.0
+                            for i in range(1, 15):
+                                diff = closes[i] - closes[i-1]
+                                if diff > 0:
+                                    gains += diff
+                                else:
+                                    losses += abs(diff)
+                            avg_gain = gains / 14.0
+                            avg_loss = losses / 14.0
+                            if avg_loss == 0:
+                                rsi = 100.0
+                            else:
+                                rs = avg_gain / avg_loss
+                                rsi = 100.0 - (100.0 / (1.0 + rs))
+                            _rsi15m_cache[stockname] = round(rsi, 2)
+                    except Exception:
+                        continue
+            except Exception:
+                # DB not available or query failed -> leave cache as-is
+                pass
             _sma15m_last_ts = now
     except Exception:
         pass
@@ -307,8 +368,12 @@ def _refresh_daily_volratio_if_needed(symbols: List[str]):
                     a5 = float(avg5) if avg5 is not None else None
                     a200 = float(avg200) if avg200 is not None else None
                     ratio = None
-                    if a5 is not None and a200 and a200 != 0:
-                        ratio = round(a5 / a200, 2)
+                    # Explicitly check for None and zero to avoid skipping valid values
+                    if a5 is not None and a200 is not None and a200 != 0:
+                        try:
+                            ratio = round(a5 / a200, 2)
+                        except Exception:
+                            ratio = None
                     _volratio_cache[stockname] = ratio  # may be None
                 except Exception:
                     continue
@@ -395,6 +460,113 @@ def _refresh_days_since_golden_cross_if_needed(symbols: List[str]):
         pass
 
 
+def _find_swings_from_closes(closes: List[float], window: int = 6, top_n: int = 3):
+    """Return support and resistance levels from closes (newest-first).
+
+    Simple local-extrema method: scan chronological closes and collect local highs/lows.
+    """
+    if not closes:
+        return [], []
+    vals = list(reversed(closes))  # chronological
+    n = len(vals)
+    highs = []
+    lows = []
+    for i in range(n):
+        left = max(0, i - window)
+        right = min(n - 1, i + window)
+        v = vals[i]
+        segment = vals[left:right + 1]
+        if v == max(segment):
+            highs.append((i, v))
+        if v == min(segment):
+            lows.append((i, v))
+    highs_sorted = sorted(highs, key=lambda x: -x[0])
+    lows_sorted = sorted(lows, key=lambda x: -x[0])
+    res = []
+    sup = []
+    seen = set()
+    for _, val in highs_sorted:
+        if len(res) >= top_n:
+            break
+        v = round(float(val), 2)
+        if v in seen:
+            continue
+        res.append(v)
+        seen.add(v)
+    seen = set()
+    for _, val in lows_sorted:
+        if len(sup) >= top_n:
+            break
+        v = round(float(val), 2)
+        if v in seen:
+            continue
+        sup.append(v)
+        seen.add(v)
+    return sup, res
+
+
+def _refresh_sr_if_needed(symbols: List[str]):
+    """Populate `_sr_cache` with supports/resistances for given symbols (refresh every 15 minutes)."""
+    if not test_connection() or pg_cursor is None:
+        return
+    global _sr_last_ts
+    now = datetime.now()
+    if _sr_last_ts and (now - _sr_last_ts) < timedelta(minutes=15):
+        return
+    # We'll replace the previous support/resistance computation with a simpler
+    # rolling local extrema over the last 30 daily closes: the most recent local
+    # low and local high within a 30-day rolling window. Store results in
+    # `_sr_cache` as 'local_30d_low' and 'local_30d_high' for backward
+    # compatibility with existing code that reads `_sr_cache`.
+    if not test_connection() or pg_cursor is None:
+        return
+    try:
+        with pg_cursor() as (cur, _):
+            for sym in symbols:
+                try:
+                    cur.execute(
+                        "SELECT array_agg(close ORDER BY candle_stock DESC) FROM ohlcv_data WHERE timeframe='1d' AND stockname=%s",
+                        (sym,)
+                    )
+                    row = cur.fetchone()
+                    closes_arr = row[0] if row and row[0] is not None else []
+                    # closes are newest-first; convert to floats and keep up to 365*3 as safety
+                    closes = [float(x) for x in (closes_arr or [])][:800]
+                    if len(closes) == 0:
+                        continue
+                    # Compute rolling 30-day window local lows/highs using newest-first array
+                    window = 30
+                    recent = closes[:window]
+                    if not recent:
+                        continue
+                    try:
+                        local_low = round(float(min(recent)), 2)
+                    except Exception:
+                        local_low = None
+                    try:
+                        local_high = round(float(max(recent)), 2)
+                    except Exception:
+                        local_high = None
+                    # Also compute support/resistance swing levels (older logic) from closes
+                    try:
+                        supports, resistances = _find_swings_from_closes(closes, window=6, top_n=3)
+                    except Exception:
+                        supports, resistances = [], []
+                    with _sr_lock:
+                        # keep both legacy supports/resistances and new local 30d low/high
+                        _sr_cache[sym] = {
+                            'local_30d_low': local_low,
+                            'local_30d_high': local_high,
+                            'supports': supports,
+                            'resistances': resistances,
+                        }
+                except Exception:
+                    continue
+        _sr_last_ts = now
+    except Exception:
+        pass
+
+
 def fetch_ltp() -> Dict[str, Any]:
     """Fetch last price, last close, SMA200 (15m) and daily ratio (SMA50/SMA200).
 
@@ -419,6 +591,7 @@ def fetch_ltp() -> Dict[str, Any]:
     _refresh_sma15m_if_needed(symbols)
     _refresh_daily_volratio_if_needed(symbols)
     _refresh_days_since_golden_cross_if_needed(symbols)
+    _refresh_sr_if_needed(symbols)
 
     try:
         quote_data = kite.quote(list(instruments.values()))
@@ -432,6 +605,7 @@ def fetch_ltp() -> Dict[str, Any]:
         sma15m_snapshot = dict(_sma15m_cache)
         sma50_15m_snapshot = dict(_sma50_15m_cache)
     high200_15m_snapshot = dict(_high200_15m_cache)
+    low200_15m_snapshot = dict(_low200_15m_cache)
     last15m_snapshot = dict(_last15m_close_cache)
     with _volratio_lock:
         volratio_snapshot = dict(_volratio_cache)
@@ -471,6 +645,14 @@ def fetch_ltp() -> Dict[str, Any]:
                 drawdown_15m_200_pct = round((last_price - high200_15m) / high200_15m * 100, 2)
             except Exception:
                 drawdown_15m_200_pct = None
+        # Pullback: percent return from recent 200-candle low (15m)
+        pullback_15m_200_pct = None
+        low200 = low200_15m_snapshot.get(sym)
+        if isinstance(last_price, (int, float)) and isinstance(low200, (int, float)) and low200:
+            try:
+                pullback_15m_200_pct = round((last_price - low200) / low200 * 100, 2)
+            except Exception:
+                pullback_15m_200_pct = None
         # Geometric-mean based ranking metric using only deviations vs 15m SMA200 and daily SMA50.
         # Idea: Convert each percentage deviation into a growth factor (1 + pct/100),
         # then take geometric mean of the two and map back to a percentage.
@@ -498,10 +680,123 @@ def fetch_ltp() -> Dict[str, Any]:
             "daily_sma50": daily.get("sma50"),
             "daily_sma200": daily.get("sma200"),
             "daily_ratio_50_200": daily.get("ratio"),
+            # Expose the new local 30-day low/high (if computed) from _sr_cache
+            "local_30d_low": _sr_cache.get(sym, {}).get('local_30d_low'),
+            "local_30d_high": _sr_cache.get(sym, {}).get('local_30d_high'),
+            # Provide legacy supports/resistances for UI tables
+            "supports": _sr_cache.get(sym, {}).get('supports'),
+            "resistances": _sr_cache.get(sym, {}).get('resistances'),
+            "pullback_15m_200_pct": pullback_15m_200_pct,
         }
+        # If legacy supports/resistances are not present in _sr_cache, try a quick DB fallback
+        try:
+            sr_entry = _sr_cache.get(sym, {})
+            if not sr_entry.get('supports') and pg_cursor is not None:
+                # attempt a lightweight query to fetch recent daily closes and compute swings
+                try:
+                    with pg_cursor() as (cur, _):
+                        cur.execute("SELECT array_agg(close ORDER BY candle_stock DESC) FROM ohlcv_data WHERE timeframe='1d' AND stockname=%s", (sym,))
+                        row = cur.fetchone()
+                        closes_arr = row[0] if row and row[0] is not None else []
+                        closes = [float(x) for x in (closes_arr or [])][:800]
+                        if closes:
+                            supports, resistances = _find_swings_from_closes(closes, window=6, top_n=3)
+                            out[sym]['supports'] = supports
+                            out[sym]['resistances'] = resistances
+                except Exception:
+                    # ignore DB fallback errors
+                    pass
+            else:
+                # ensure keys exist even if None
+                out[sym]['supports'] = sr_entry.get('supports')
+                out[sym]['resistances'] = sr_entry.get('resistances')
+        except Exception:
+            # swallow any errors here to avoid breaking LTP API
+            pass
     meta = {
         "daily_ma_ready_count": sum(1 for v in daily_cache_snapshot.values() if v.get("ratio") is not None),
         "sma15m_last_refresh": _sma15m_last_ts.isoformat() if _sma15m_last_ts else None,
         "missing_last_close_15m": missing_last_close,
     }
     return {"universe": universe_name, "count": len(symbols), "meta": meta, "data": out}
+
+
+def get_ck_data() -> Dict[str, Any]:
+    """Return minimal CK view data: symbol -> { last_price, rsi_15m }.
+
+    Relies on fetch_ltp() data for last_price and on `_rsi15m_cache` populated
+    by `_refresh_sma15m_if_needed` when Postgres is available. If RSI missing,
+    value will be null.
+    """
+    try:
+        ltp_resp = fetch_ltp()
+    except Exception as e:
+        return {"error": str(e)}
+    data = ltp_resp.get('data', {})
+    out = {}
+    for sym, info in data.items():
+        last_price = info.get('last_price')
+        rsi = _rsi15m_cache.get(sym)
+        # Strategy heuristics (CK final):
+        # - Bullish setup: 15m sma50 > sma200 and daily sma50 > daily sma200
+        # - Pullback: bullish but price below 15m sma200 or below sma50_15m
+        # - Valuation stretch: daily_ratio_50_200 significantly > 1 (e.g., >1.08)
+        # - Call Tops: if daily ratio is high but 15m momentum weak or rapid losses
+        sma50_15m = info.get('sma50_15m')
+        sma200_15m = info.get('sma200_15m')
+        daily_ratio = info.get('daily_ratio_50_200')
+        pct_vs_15m = info.get('pct_vs_15m_sma200')
+        days_since_gc = info.get('days_since_golden_cross')
+
+        signal = 'Neutral'
+        action = 'Hold'
+        try:
+            bullish_15m = (isinstance(sma50_15m, (int,float)) and isinstance(sma200_15m, (int,float)) and sma50_15m > sma200_15m)
+            bullish_daily = (isinstance(daily_ratio, (int,float)) and daily_ratio > 1.0)
+            if bullish_15m and bullish_daily:
+                # Strong multi-timeframe alignment
+                signal = 'Bullish'
+                # If price dipped below 15m SMA200 or sma50_15m -> pullback accumulation
+                if isinstance(pct_vs_15m, (int,float)) and pct_vs_15m < 0:
+                    action = 'Accumulate on pullback'
+                else:
+                    action = 'Trade / Add on strength'
+            elif bullish_daily and not bullish_15m:
+                signal = 'Daily Bull'
+                # Daily strong but 15m lag -> watch for weekly follow-up
+                action = 'Watch for pullback -> accumulate'
+            # Valuation stretch
+            if isinstance(daily_ratio, (int,float)) and daily_ratio > 1.08:
+                # Mark as stretched; be cautious about adding new positions
+                if signal.startswith('Bull'):
+                    action = 'Caution: valuation stretched'
+                else:
+                    signal = 'Stretched'
+                    action = 'Defer new buys'
+            # Call tops: simple heuristic
+            if isinstance(days_since_gc, int) and days_since_gc is not None and days_since_gc <= 5 and isinstance(pct_vs_15m, (int,float)) and pct_vs_15m < -3:
+                # recent golden cross but sharp drop on 15m -> possible top/significant distribution
+                signal = 'Top Risk'
+                action = 'Call Top / Reduce'
+        except Exception:
+            pass
+
+        out[sym] = {"last_price": last_price, "rsi_15m": rsi, "signal": signal, "action": action}
+        # attach SR and trading zone percent if available
+        try:
+            sr = _sr_cache.get(sym, {})
+            if sr:
+                low = sr.get('local_30d_low')
+                high = sr.get('local_30d_high')
+                out[sym]['local_30d_low'] = low
+                out[sym]['local_30d_high'] = high
+                try:
+                    if isinstance(low, (int, float)) and isinstance(high, (int, float)) and low != 0:
+                        out[sym]['trading_zone_pct'] = round((high - low) / low, 4)
+                    else:
+                        out[sym]['trading_zone_pct'] = None
+                except Exception:
+                    out[sym]['trading_zone_pct'] = None
+        except Exception:
+            pass
+    return {"count": len(out), "data": out}

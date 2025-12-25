@@ -11,7 +11,7 @@ mode: simulate   # one of [simulate, live]
 strategy: momentum
 
 # Stock universe list name defined in tools/NiftySymbol.py (e.g., mystocks, allstocks, fno_stocks, nifty500, NiftyMidcap100)
-universe_list: nifty500
+universe_list: stocks2026
 
 # Strategy parameters (defaults applied if omitted)
 strategy_params:

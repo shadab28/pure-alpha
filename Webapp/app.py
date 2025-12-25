@@ -205,6 +205,24 @@ def api_ltp():
 		return jsonify({"error": str(e)}), 500
 
 
+@app.route('/api/ck')
+def api_ck():
+	"""Return CK dashboard data (symbols and 15m RSI).
+
+	Uses ltp_service.get_ck_data() which will compute/return RSI when available.
+	"""
+	try:
+		access_logger.info("GET /api/ck from %s", request.remote_addr)
+		from ltp_service import get_ck_data  # type: ignore
+		res = get_ck_data()
+		if 'error' in res:
+			return jsonify({"error": res.get('error')}), 500
+		return jsonify(res)
+	except Exception as e:
+		error_logger.exception("/api/ck failed: %s", e)
+		return jsonify({"error": str(e)}), 500
+
+
 @app.get("/api/orderbook")
 def api_orderbook():
 	"""Return the active/open broker order book directly from Kite."""

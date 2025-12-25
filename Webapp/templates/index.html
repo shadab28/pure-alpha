@@ -30,6 +30,7 @@
       .btn-row { margin-bottom: 12px; }
       .btn { padding: 8px 12px; margin-right: 6px; cursor: pointer; border: 1px solid var(--blue-600); color: var(--white); background: var(--blue-600); border-radius: 6px; font-weight: 600; }
       .btn.secondary { color: var(--blue-700); background: var(--white); border-color: var(--blue-700); }
+  .btn.active { color: var(--white); background: var(--blue-600); border-color: var(--blue-600); }
       .btn:hover { filter: brightness(1.05); }
   .btn.small { padding: 4px 8px; font-size: 12px; }
 
@@ -60,6 +61,7 @@
     <div class="btn-row" style="margin-top:-4px;">
   <button id="tab-main" class="btn secondary">All</button>
   <button id="tab-filtered" class="btn secondary">Filtered</button>
+    <button id="tab-ck" class="btn secondary">CK</button>
   <button id="tab-orders" class="btn secondary">Orders</button>
   <button id="tab-active" class="btn secondary">Active Orderbook</button>
     </div>
@@ -84,6 +86,8 @@
           <th data-key="ratio_15m_50_200">15m 50/200 Ratio</th>
           <th data-key="pct_vs_daily_sma50">% vs Daily SMA50</th>
           <th data-key="daily_ratio_50_200">Daily 50/200 Ratio</th>
+          <th>Supports</th>
+          <th>Resistances</th>
           <th data-key="volume_ratio_d5_d200">Volume Ratio</th>
           <th>Buy + SL 5% (₹10k)</th>
         </tr>
@@ -92,6 +96,28 @@
     </table>
       </div>
     </div>
+
+      <!-- CK view -->
+      <div id="view-ck" class="card" style="display:none; margin-top:14px;">
+        <div class="card-header">CK - RSI (15m)</div>
+        <div class="card-body">
+          <table id="ck-table">
+            <thead>
+              <tr>
+                <th data-key="symbol">Symbol</th>
+                <th data-key="last_price">Last Price</th>
+                <th data-key="rsi_15m">RSI (15m)</th>
+                <th data-key="local_30d_low">Local 30d Low</th>
+                <th data-key="local_30d_high">Local 30d High</th>
+                <th data-key="trading_zone_pct">Trading Zone %</th>
+                <th data-key="signal">Signal</th>
+                <th data-key="action">Action</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
 
     <!-- Filtered view -->
     <div id="view-filtered" class="card" style="display:none; margin-top:14px;">
@@ -141,6 +167,7 @@
               <th data-key="symbol">Symbol</th>
               <th data-key="rank_gm">Rank (GM)</th>
               <th data-key="drawdown_15m_200_pct">Drawdown %</th>
+              <th data-key="pullback_15m_200_pct">Pullback %</th>
               <th data-key="days_since_golden_cross">Days Since Crossover</th>
               <th data-key="last_price">Last Price</th>
               <th data-key="last_close">Last Close (15m)</th>
@@ -306,7 +333,7 @@
             const lp = d.last_price;
             const lc = d.last_close;
             const pct = (typeof lp === 'number' && typeof lc === 'number' && lc) ? ((lp - lc) / lc * 100) : null;
-            return {
+      return {
               symbol: s,
               rank_gm: d.rank_gm,
               last_price: lp,
@@ -318,10 +345,13 @@
               pct_vs_15m_sma200: d.pct_vs_15m_sma200,
               pct_vs_daily_sma50: d.pct_vs_daily_sma50,
               drawdown_15m_200_pct: d.drawdown_15m_200_pct,
+              pullback_15m_200_pct: d.pullback_15m_200_pct,
               days_since_golden_cross: d.days_since_golden_cross,
               daily_sma50: d.daily_sma50,   // hidden
               daily_sma200: d.daily_sma200, // hidden
               daily_ratio_50_200: d.daily_ratio_50_200,
+              supports: d.supports,
+              resistances: d.resistances,
               volume_ratio_d5_d200: d.volume_ratio_d5_d200
             };
           });
@@ -337,6 +367,7 @@
           <td>${r.symbol}</td>
           <td><span class="badge rank">${r.rank_gm != null ? r.rank_gm.toFixed(2) : ''}</span></td>
           <td><span class="num" style="color:${r.drawdown_15m_200_pct!=null? inversePctColor(Math.abs(r.drawdown_15m_200_pct)) : ''}">${r.drawdown_15m_200_pct != null ? Math.abs(r.drawdown_15m_200_pct).toFixed(2) + '%' : ''}</span></td>
+          <td>${r.pullback_15m_200_pct != null ? r.pullback_15m_200_pct.toFixed(2) + '%' : ''}</td>
           <td>${r.days_since_golden_cross != null ? r.days_since_golden_cross : ''}</td>
           <td>${fmtNum(r.last_price)}</td>
           <td>${fmtNum(r.last_close)}</td>
@@ -356,7 +387,10 @@
         tbody.innerHTML = '';
         for (const r of rows){
           const tr = document.createElement('tr');
-          tr.innerHTML = rowHtml(r);
+          // render supports/resistances arrays
+          const sup = (r.supports && r.supports.length) ? r.supports.join(', ') : '';
+          const resArr = (r.resistances && r.resistances.length) ? r.resistances.join(', ') : '';
+          tr.innerHTML = rowHtml(r).replace('</td>\n          <td>' + fmtNum(r.last_close) + '</td>', '</td>\n          <td>' + fmtNum(r.last_close) + '</td>\n          <td>' + sup + '</td>\n          <td>' + resArr + '</td>');
           tbody.appendChild(tr);
         }
       }
@@ -441,51 +475,94 @@
       function manualRefresh(){ fetchLTP(); }
       function downloadCSV(){ window.location = '/export/ltp.csv'; }
       // Tabs logic
+      // Tab elements
       const tabMain = document.getElementById('tab-main');
       const tabFiltered = document.getElementById('tab-filtered');
       const tabOrders = document.getElementById('tab-orders');
-      function setActiveTab(which){
-        if (which === 'main'){
-          document.getElementById('view-main').style.display='block';
-          document.getElementById('view-filtered').style.display='none';
-          document.getElementById('view-orders').style.display='none';
-          tabMain.classList.remove('secondary');
-          tabFiltered.classList.add('secondary');
-          tabOrders.classList.add('secondary');
-        } else {
-          document.getElementById('view-main').style.display='none';
-          document.getElementById('view-orders').style.display='none';
-          document.getElementById('view-filtered').style.display='block';
-          tabFiltered.classList.remove('secondary');
-          tabMain.classList.add('secondary');
-          tabOrders.classList.add('secondary');
-        }
-      }
-      function setOrdersTab(){
-        document.getElementById('view-main').style.display='none';
-        document.getElementById('view-filtered').style.display='none';
-        document.getElementById('view-orders').style.display='block';
-        tabOrders.classList.remove('secondary');
-        tabMain.classList.add('secondary');
-        tabFiltered.classList.add('secondary');
-        fetchOrders();
-        }
-      tabMain.addEventListener('click', ()=> setActiveTab('main'));
-      tabFiltered.addEventListener('click', ()=> setActiveTab('filtered'));
-      tabOrders.addEventListener('click', ()=> setOrdersTab());
       const tabActive = document.getElementById('tab-active');
-      function setActiveOrderbookTab(){
-        document.getElementById('view-main').style.display='none';
-        document.getElementById('view-filtered').style.display='none';
-        document.getElementById('view-orders').style.display='none';
-        document.getElementById('view-active').style.display='block';
-        tabActive.classList.remove('secondary');
-        tabMain.classList.add('secondary');
-        tabFiltered.classList.add('secondary');
-        tabOrders.classList.add('secondary');
-        fetchActiveOrderbook();
+      const tabCK = document.getElementById('tab-ck');
+
+      // Generic helper: show one view and highlight its tab with .active
+      function setSelectedTab(tabEl, viewId){
+        // hide all views
+        ['view-main','view-filtered','view-orders','view-active','view-ck'].forEach(id=>{
+          const v = document.getElementById(id); if (v) v.style.display = 'none';
+        });
+        // normalize classes: set all tabs to exactly 'btn secondary' (remove active)
+        [tabMain, tabFiltered, tabOrders, tabActive, tabCK].forEach(t=>{
+          if (!t) return;
+          t.classList.remove('active');
+          t.classList.remove('secondary');
+          t.classList.add('secondary');
+        });
+        // show requested view and mark tab active (remove secondary)
+        const view = document.getElementById(viewId);
+        if (view) view.style.display = 'block';
+        if (tabEl){
+          tabEl.classList.remove('secondary');
+          tabEl.classList.remove('active');
+          tabEl.classList.add('active');
+        }
       }
-      if (tabActive) tabActive.addEventListener('click', () => setActiveOrderbookTab());
+
+  tabMain.addEventListener('click', ()=> setSelectedTab(tabMain, 'view-main'));
+      tabFiltered.addEventListener('click', ()=> setSelectedTab(tabFiltered, 'view-filtered'));
+      tabOrders.addEventListener('click', ()=> { setSelectedTab(tabOrders, 'view-orders'); fetchOrders(); });
+      if (tabActive) tabActive.addEventListener('click', ()=> { setSelectedTab(tabActive, 'view-active'); fetchActiveOrderbook(); });
+  if (tabCK) tabCK.addEventListener('click', ()=> { setSelectedTab(tabCK, 'view-ck'); fetchCK(); });
+
+  // Default to All (main) tab on load
+  setSelectedTab(tabMain, 'view-main');
+
+  // CK tab wiring handled by generic setSelectedTab helper below
+
+  let ckInterval = null;
+  let latestCKRows = [];
+  let sortStateCK = { key: 'symbol', dir: 'asc' };
+
+  function renderCKTable(){
+    const tbody = document.querySelector('#ck-table tbody');
+    const rows = latestCKRows.slice();
+    applySort(rows, sortStateCK);
+    tbody.innerHTML = '';
+    for (const r of rows){
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${r.symbol}</td><td>${r.last_price!=null? r.last_price.toFixed(2): ''}</td><td>${r.rsi_15m!=null? r.rsi_15m.toFixed(2): ''}</td><td>${r.local_30d_low!=null? r.local_30d_low.toFixed(2): ''}</td><td>${r.local_30d_high!=null? r.local_30d_high.toFixed(2): ''}</td><td>${r.trading_zone_pct!=null? (r.trading_zone_pct*100).toFixed(2)+'%': ''}</td><td>${r.signal||''}</td><td>${r.action||''}</td>`;
+      tbody.appendChild(tr);
+    }
+  }
+
+  async function fetchCK(){
+    try{
+      const res = await fetch('/api/ck');
+      const j = await res.json();
+      if (!res.ok) throw new Error(j.error || 'Failed to fetch CK');
+      const data = j.data || {};
+      const syms = Object.keys(data).sort();
+      latestCKRows = syms.map(s=>{
+        const info = data[s] || {};
+        return {
+          symbol: s,
+          last_price: (typeof info.last_price==='number')? info.last_price : (info.last_price? Number(info.last_price): null),
+          rsi_15m: (typeof info.rsi_15m==='number')? info.rsi_15m : (info.rsi_15m? Number(info.rsi_15m): null),
+          local_30d_low: info.local_30d_low != null ? info.local_30d_low : null,
+          local_30d_high: info.local_30d_high != null ? info.local_30d_high : null,
+          trading_zone_pct: info.trading_zone_pct != null ? info.trading_zone_pct : null,
+          signal: info.signal || '',
+          action: info.action || ''
+        };
+      });
+      renderCKTable();
+    }catch(e){
+      const tbody = document.querySelector('#ck-table tbody'); if (tbody) tbody.innerHTML = `<tr><td colspan="8" class="muted">${e.message}</td></tr>`;
+    }
+    // polling management: if CK view visible, ensure interval running
+    try{ clearInterval(ckInterval); }catch(e){}
+    if (document.getElementById('view-ck').style.display==='block') ckInterval = setInterval(fetchCK, 10000);
+  }
+
+  // Attach sorting to CK table (after renderCKTable and sortStateCK exist)
+  attachSortingFor('ck-table', sortStateCK, renderCKTable);
 
   // Filters handlers
       document.getElementById('apply-filters').addEventListener('click', ()=> renderFilteredTable());
@@ -496,7 +573,7 @@
 
   // Header Filter button to show filtered view
   const btnShowFiltered = document.getElementById('btn-show-filtered');
-  if (btnShowFiltered){ btnShowFiltered.addEventListener('click', ()=> setActiveTab('filtered')); }
+  if (btnShowFiltered){ btnShowFiltered.addEventListener('click', ()=> setSelectedTab(tabFiltered, 'view-filtered')); }
 
   // Place LIMIT buy at 0.1% below LTP with 5% GTT stop-loss for ₹10,000
       async function placeBuy(symbol, btn){
