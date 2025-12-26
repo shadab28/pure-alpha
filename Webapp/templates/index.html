@@ -367,7 +367,7 @@
           <td>${r.symbol}</td>
           <td><span class="badge rank">${r.rank_gm != null ? r.rank_gm.toFixed(2) : ''}</span></td>
           <td><span class="num" style="color:${r.drawdown_15m_200_pct!=null? inversePctColor(Math.abs(r.drawdown_15m_200_pct)) : ''}">${r.drawdown_15m_200_pct != null ? Math.abs(r.drawdown_15m_200_pct).toFixed(2) + '%' : ''}</span></td>
-          <td>${r.pullback_15m_200_pct != null ? r.pullback_15m_200_pct.toFixed(2) + '%' : ''}</td>
+          <td><span class="num" style="color:${r.pullback_15m_200_pct!=null? pctColor(r.pullback_15m_200_pct) : ''}">${r.pullback_15m_200_pct != null ? r.pullback_15m_200_pct.toFixed(2) + '%' : ''}</span></td>
           <td>${r.days_since_golden_cross != null ? r.days_since_golden_cross : ''}</td>
           <td>${fmtNum(r.last_price)}</td>
           <td>${fmtNum(r.last_close)}</td>
