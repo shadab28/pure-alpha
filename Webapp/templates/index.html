@@ -362,12 +362,25 @@
           err.textContent = e.message;
         }
       }
-      function rowHtml(r){
+      // r: row object, opts: { ddMin, ddMax, pbMin, pbMax } - optional per-column color ranges
+      function rowHtml(r, opts){
+        opts = opts || {};
+        // Drawdown color: inversePctColor expects (value, min, max). We use absolute drawdown magnitude.
+        const ddVal = (typeof r.drawdown_15m_200_pct === 'number') ? Math.abs(r.drawdown_15m_200_pct) : null;
+        const ddMin = (typeof opts.ddMin === 'number') ? opts.ddMin : 0;
+        const ddMax = (typeof opts.ddMax === 'number') ? opts.ddMax : 20;
+        const ddColor = ddVal != null ? inversePctColor(ddVal, ddMin, ddMax) : '';
+        // Pullback color: use pctColor with per-column min/max
+        const pbVal = (typeof r.pullback_15m_200_pct === 'number') ? r.pullback_15m_200_pct : null;
+        const pbMin = (typeof opts.pbMin === 'number') ? opts.pbMin : -20;
+        const pbMax = (typeof opts.pbMax === 'number') ? opts.pbMax : 20;
+        const pbColor = pbVal != null ? pctColor(pbVal, pbMin, pbMax) : '';
+
         return `
           <td>${r.symbol}</td>
           <td><span class="badge rank">${r.rank_gm != null ? r.rank_gm.toFixed(2) : ''}</span></td>
-          <td><span class="num" style="color:${r.drawdown_15m_200_pct!=null? inversePctColor(Math.abs(r.drawdown_15m_200_pct)) : ''}">${r.drawdown_15m_200_pct != null ? Math.abs(r.drawdown_15m_200_pct).toFixed(2) + '%' : ''}</span></td>
-          <td><span class="num" style="color:${r.pullback_15m_200_pct!=null? pctColor(r.pullback_15m_200_pct) : ''}">${r.pullback_15m_200_pct != null ? r.pullback_15m_200_pct.toFixed(2) + '%' : ''}</span></td>
+          <td><span class="num" style="color:${ddColor}">${ddVal != null ? ddVal.toFixed(2) + '%' : ''}</span></td>
+          <td><span class="num" style="color:${pbColor}">${pbVal != null ? pbVal.toFixed(2) + '%' : ''}</span></td>
           <td>${r.days_since_golden_cross != null ? r.days_since_golden_cross : ''}</td>
           <td>${fmtNum(r.last_price)}</td>
           <td>${fmtNum(r.last_close)}</td>
@@ -433,9 +446,23 @@
         const arr = latestRows.filter(r => matchFilters(r, f));
         applySort(arr, sortStateFiltered);
         tbody.innerHTML = '';
+        // compute per-column ranges for visible rows
+        let ddMin = Infinity, ddMax = -Infinity, pbMin = Infinity, pbMax = -Infinity;
+        for (const r of arr){
+          const dd = (typeof r.drawdown_15m_200_pct === 'number') ? Math.abs(r.drawdown_15m_200_pct) : null;
+          const pb = (typeof r.pullback_15m_200_pct === 'number') ? r.pullback_15m_200_pct : null;
+          if (dd != null){ ddMin = Math.min(ddMin, dd); ddMax = Math.max(ddMax, dd); }
+          if (pb != null){ pbMin = Math.min(pbMin, pb); pbMax = Math.max(pbMax, pb); }
+        }
+        if (ddMin === Infinity) ddMin = 0;
+        if (ddMax === -Infinity) ddMax = 20;
+        if (pbMin === Infinity) pbMin = -20;
+        if (pbMax === -Infinity) pbMax = 20;
+
+        const opts = { ddMin, ddMax, pbMin, pbMax };
         for (const r of arr){
           const tr = document.createElement('tr');
-          tr.innerHTML = rowHtml(r);
+          tr.innerHTML = rowHtml(r, opts);
           tbody.appendChild(tr);
         }
       }
