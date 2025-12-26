@@ -110,6 +110,8 @@
                 <th data-key="local_30d_low">Local 30d Low</th>
                 <th data-key="local_30d_high">Local 30d High</th>
                 <th data-key="trading_zone_pct">Trading Zone %</th>
+                <th data-key="drawdown_15m_200_pct">Drawdown %</th>
+                <th data-key="pullback_15m_200_pct">Pullback %</th>
                 <th data-key="signal">Signal</th>
                 <th data-key="action">Action</th>
               </tr>
@@ -552,9 +554,25 @@
     const rows = latestCKRows.slice();
     applySort(rows, sortStateCK);
     tbody.innerHTML = '';
+    // compute per-column min/max for drawdown and pullback to scale colors
+    let ddMin = null, ddMax = null, pbMin = null, pbMax = null;
+    for (const r of rows){
+      const dd = (typeof r.drawdown_15m_200_pct === 'number') ? r.drawdown_15m_200_pct : null;
+      const pb = (typeof r.pullback_15m_200_pct === 'number') ? r.pullback_15m_200_pct : null;
+      if (dd != null){ if (ddMin == null || dd < ddMin) ddMin = dd; if (ddMax == null || dd > ddMax) ddMax = dd; }
+      if (pb != null){ if (pbMin == null || pb < pbMin) pbMin = pb; if (pbMax == null || pb > pbMax) pbMax = pb; }
+    }
+    // set sensible defaults if no range found
+    if (ddMin == null) { ddMin = -20; ddMax = 0; }
+    if (pbMin == null) { pbMin = 0; pbMax = 20; }
+
     for (const r of rows){
       const tr = document.createElement('tr');
-      tr.innerHTML = `<td>${r.symbol}</td><td>${r.last_price!=null? r.last_price.toFixed(2): ''}</td><td>${r.rsi_15m!=null? r.rsi_15m.toFixed(2): ''}</td><td>${r.local_30d_low!=null? r.local_30d_low.toFixed(2): ''}</td><td>${r.local_30d_high!=null? r.local_30d_high.toFixed(2): ''}</td><td>${r.trading_zone_pct!=null? (r.trading_zone_pct*100).toFixed(2)+'%': ''}</td><td>${r.signal||''}</td><td>${r.action||''}</td>`;
+      const dd = (typeof r.drawdown_15m_200_pct === 'number') ? r.drawdown_15m_200_pct : null;
+      const pb = (typeof r.pullback_15m_200_pct === 'number') ? r.pullback_15m_200_pct : null;
+      const ddStyle = dd != null ? `style="color: ${inversePctColor(dd, ddMin, ddMax)};"` : '';
+      const pbStyle = pb != null ? `style="color: ${pctColor(pb, pbMin, pbMax)};"` : '';
+      tr.innerHTML = `<td>${r.symbol}</td><td>${r.last_price!=null? r.last_price.toFixed(2): ''}</td><td>${r.rsi_15m!=null? r.rsi_15m.toFixed(2): ''}</td><td>${r.local_30d_low!=null? r.local_30d_low.toFixed(2): ''}</td><td>${r.local_30d_high!=null? r.local_30d_high.toFixed(2): ''}</td><td>${r.trading_zone_pct!=null? (r.trading_zone_pct*100).toFixed(2)+'%': ''}</td><td ${ddStyle}>${dd!=null? dd.toFixed(2)+'%': ''}</td><td ${pbStyle}>${pb!=null? pb.toFixed(2)+'%': ''}</td><td>${r.signal||''}</td><td>${r.action||''}</td>`;
       tbody.appendChild(tr);
     }
   }

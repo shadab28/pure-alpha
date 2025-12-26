@@ -781,7 +781,15 @@ def get_ck_data() -> Dict[str, Any]:
         except Exception:
             pass
 
-        out[sym] = {"last_price": last_price, "rsi_15m": rsi, "signal": signal, "action": action}
+        out[sym] = {
+            "last_price": last_price,
+            "rsi_15m": rsi,
+            "signal": signal,
+            "action": action,
+            # include drawdown and pullback so CK view can render and colorize them
+            "drawdown_15m_200_pct": info.get('drawdown_15m_200_pct'),
+            "pullback_15m_200_pct": info.get('pullback_15m_200_pct'),
+        }
         # attach SR and trading zone percent if available
         try:
             sr = _sr_cache.get(sym, {})
