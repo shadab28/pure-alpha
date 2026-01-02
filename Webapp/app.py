@@ -690,7 +690,7 @@ def _place_bracket_oco_gtt(kite, symbol: str, qty: int, ref_price: float, target
 	return resp.get('trigger_id') or resp.get('id')
 
 
-# ---------- Trailing GTT manager (best-effort client-side) ----------
+# ---------- Trailing GTT manager (best-effort client-side) ---------- 
 _trail_lock = None
 _trail_state = {}
 _trail_thread_started = False
