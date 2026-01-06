@@ -321,16 +321,16 @@ def run(universe_name: str | None, mode: str, log_level: str):
 
 	# Simple monitor loop
 	try:
-		last_heartbeat_print: float = 0.0
+		last_status_print: float = 0.0
 		while True:
 			time.sleep(5)
-			# Periodic running timestamp (every ~60s), rounded to minute and formatted hh:mm:ss
+			# Periodic status logging (every 60s)
 			now_ts = time.time()
-			if now_ts - last_heartbeat_print >= 120:
-				cur = datetime.now()
-				cur_rounded = cur.replace(second=0, microsecond=0)
-				logging.info("Program running at %s", cur_rounded.strftime('%H:%M:%S'))
-				last_heartbeat_print = now_ts
+			if now_ts - last_status_print >= 60:
+				symbol_count = len(store.by_symbol)
+				agg_count = len(agg.open)
+				logging.info("Status: %d symbols tracked, %d in aggregation", symbol_count, agg_count)
+				last_status_print = now_ts
 			# Persist at exact 00/15/30/45 minute boundaries
 			# Use exchange timezone (IST) and then store naive timestamps (timestamp without time zone)
 			now = datetime.now(ZoneInfo("Asia/Kolkata"))
@@ -363,12 +363,13 @@ def run(universe_name: str | None, mode: str, log_level: str):
 								"""
 							)
 							rows = agg.snapshot_rows(ts_naive, '15m')
+							logging.info("Attempting to save candles at %s. Aggregation has %d symbols tracked.", ts_naive.isoformat(sep=' '), len(agg.open))
 							if rows:
 								cur.executemany(
 									"INSERT INTO ohlcv_data(timeframe, stockname, candle_stock, open, high, low, close, volume) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
 									rows,
 								)
-						logging.info("Saved %d 15m candles to ohlcv_data at %s.", len(rows), ts_naive.isoformat(sep=' '))
+							logging.info("Saved %d 15m candles to ohlcv_data at %s.", len(rows), ts_naive.isoformat(sep=' '))
 					except Exception as e:
 						logging.warning("Failed to save 15m candles: %s", e)
 				# Whether saved or not, mark boundary processed and reset aggregation

@@ -796,8 +796,22 @@ def get_ck_data() -> Dict[str, Any]:
             if sr:
                 low = sr.get('local_30d_low')
                 high = sr.get('local_30d_high')
-                out[sym]['local_30d_low'] = low
-                out[sym]['local_30d_high'] = high
+                # convert to percent-away relative to last_price for CK view
+                try:
+                    if isinstance(last_price, (int, float)) and isinstance(low, (int, float)) and low:
+                        low_pct = round((last_price - low) / low * 100.0, 2)
+                    else:
+                        low_pct = None
+                    if isinstance(last_price, (int, float)) and isinstance(high, (int, float)) and high:
+                        # show as positive distance below the high
+                        high_pct = round(abs((last_price - high) / high) * 100.0, 2)
+                    else:
+                        high_pct = None
+                except Exception:
+                    low_pct = None
+                    high_pct = None
+                out[sym]['local_30d_low'] = low_pct
+                out[sym]['local_30d_high'] = high_pct
                 try:
                     if isinstance(low, (int, float)) and isinstance(high, (int, float)) and low != 0:
                         out[sym]['trading_zone_pct'] = round((high - low) / low, 4)

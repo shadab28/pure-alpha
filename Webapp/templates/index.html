@@ -78,7 +78,7 @@
         <tr>
           <th data-key="symbol">Symbol</th>
           <th data-key="rank_gm">Rank (GM)</th>
-          <th data-key="drawdown_15m_200_pct">Drawdown %</th>
+          <th data-key="drawdown_15m_200_pct">Drawdown</th>
           <th data-key="days_since_golden_cross">Days Since Crossover</th>
           <th data-key="last_price">Last Price</th>
           <th data-key="last_close">Last Close (15m)</th>
@@ -101,23 +101,53 @@
       <div id="view-ck" class="card" style="display:none; margin-top:14px;">
         <div class="card-header">CK - RSI (15m)</div>
         <div class="card-body">
-          <table id="ck-table">
-            <thead>
-              <tr>
-                <th data-key="symbol">Symbol</th>
-                <th data-key="last_price">Last Price</th>
-                <th data-key="rsi_15m">RSI (15m)</th>
-                <th data-key="local_30d_low">Local 30d Low</th>
-                <th data-key="local_30d_high">Local 30d High</th>
-                <th data-key="trading_zone_pct">Trading Zone %</th>
-                <th data-key="drawdown_15m_200_pct">Drawdown %</th>
-                <th data-key="pullback_15m_200_pct">Pullback %</th>
-                <th data-key="signal">Signal</th>
-                <th data-key="action">Action</th>
-              </tr>
-            </thead>
-            <tbody></tbody>
-          </table>
+          <!-- Sub-tabs for CK -->
+          <div class="btn-row" style="margin-bottom:12px;">
+            <button id="ck-subtab-momentum" class="btn small active">Momentum</button>
+            <button id="ck-subtab-reversals" class="btn small secondary">Reversals at Levels</button>
+          </div>
+
+          <!-- Momentum sub-view -->
+          <div id="ck-view-momentum">
+            <table id="ck-table-momentum">
+              <thead>
+                <tr>
+                  <th data-key="symbol">Symbol</th>
+                  <th data-key="rank_gm">Rank (GM)</th>
+                  <th data-key="last_price">Last Price</th>
+                  <th data-key="rsi_15m">RSI (15m)</th>
+                  <th data-key="local_30d_low">Local 30d Low <br>(% above the low)</th>
+                  <th data-key="local_30d_high">Local 30d High<br>(% below the high)</th>
+                  <th data-key="trading_zone_pct">Trading Zone %</th>
+                  <th data-key="signal">Signal</th>
+                  <th data-key="action">Action</th>
+                  <th>Buy + SL 5% (₹10k)</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+
+          <!-- Reversals at Levels sub-view -->
+          <div id="ck-view-reversals" style="display:none;">
+            <table id="ck-table-reversals">
+              <thead>
+                <tr>
+                  <th data-key="symbol">Symbol</th>
+                  <th data-key="rank_gm">Rank (GM)</th>
+                  <th data-key="last_price">Last Price</th>
+                  <th data-key="rsi_15m">RSI (15m)</th>
+                  <th data-key="local_30d_low">Local 30d Low <br>(% above the low)</th>
+                  <th data-key="local_30d_high">Local 30d High<br>(% below the high)</th>
+                  <th data-key="trading_zone_pct">Trading Zone %</th>
+                  <th data-key="signal">Signal</th>
+                  <th data-key="action">Action</th>
+                  <th>Buy + SL 5% (₹10k)</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
         </div>
       </div>
 
@@ -151,11 +181,11 @@
             <input id="f-rd-max" type="number" step="0.01" placeholder="max" style="padding:6px; width:140px;" />
           </div>
           <div>
-            <div class="muted" style="font-size:12px;">Drawdown % min</div>
+            <div class="muted" style="font-size:12px;">Drawdown min</div>
             <input id="f-dd-min" type="number" step="0.01" placeholder="min" style="padding:6px; width:120px;" />
           </div>
           <div>
-            <div class="muted" style="font-size:12px;">Drawdown % max</div>
+            <div class="muted" style="font-size:12px;">Drawdown max</div>
             <input id="f-dd-max" type="number" step="0.01" placeholder="max" style="padding:6px; width:120px;" />
           </div>
           <div>
@@ -168,8 +198,8 @@
             <tr>
               <th data-key="symbol">Symbol</th>
               <th data-key="rank_gm">Rank (GM)</th>
-              <th data-key="drawdown_15m_200_pct">Drawdown %</th>
-              <th data-key="pullback_15m_200_pct">Pullback %</th>
+              <th data-key="drawdown_15m_200_pct">Drawdown</th>
+              <th data-key="pullback_15m_200_pct">Pullback</th>
               <th data-key="days_since_golden_cross">Days Since Crossover</th>
               <th data-key="last_price">Last Price</th>
               <th data-key="last_close">Last Close (15m)</th>
@@ -202,6 +232,7 @@
               <th>Order ID</th>
               <th>Qty</th>
               <th>Price</th>
+              <th>LTP</th>
               <th>Status</th>
               <th>Type</th>
               <th>Actions</th>
@@ -216,7 +247,10 @@
             <tr>
               <th>Symbol</th>
               <th>GTT ID</th>
-              <th>Trigger</th>
+              <th>Qty</th>
+              <th>LTP</th>
+              <th>Stop</th>
+              <th>Target</th>
               <th>Type</th>
               <th>Status</th>
               <th>Actions</th>
@@ -543,37 +577,74 @@
   // Default to All (main) tab on load
   setSelectedTab(tabMain, 'view-main');
 
-  // CK tab wiring handled by generic setSelectedTab helper below
+  // CK Sub-tabs logic
+  let ckActiveSubtab = 'momentum'; // 'momentum' or 'reversals'
+  const ckSubtabMomentum = document.getElementById('ck-subtab-momentum');
+  const ckSubtabReversals = document.getElementById('ck-subtab-reversals');
+
+  function setCKSubtab(subtab) {
+    ckActiveSubtab = subtab;
+    // Toggle sub-tab button styles
+    if (subtab === 'momentum') {
+      ckSubtabMomentum.classList.remove('secondary');
+      ckSubtabMomentum.classList.add('active');
+      ckSubtabReversals.classList.remove('active');
+      ckSubtabReversals.classList.add('secondary');
+      document.getElementById('ck-view-momentum').style.display = 'block';
+      document.getElementById('ck-view-reversals').style.display = 'none';
+    } else {
+      ckSubtabReversals.classList.remove('secondary');
+      ckSubtabReversals.classList.add('active');
+      ckSubtabMomentum.classList.remove('active');
+      ckSubtabMomentum.classList.add('secondary');
+      document.getElementById('ck-view-momentum').style.display = 'none';
+      document.getElementById('ck-view-reversals').style.display = 'block';
+    }
+    renderCKTables();
+  }
+
+  if (ckSubtabMomentum) ckSubtabMomentum.addEventListener('click', () => setCKSubtab('momentum'));
+  if (ckSubtabReversals) ckSubtabReversals.addEventListener('click', () => setCKSubtab('reversals'));
 
   let ckInterval = null;
   let latestCKRows = [];
-  let sortStateCK = { key: 'symbol', dir: 'asc' };
+  let sortStateCKMomentum = { key: 'rank_gm', dir: 'desc' };
+  let sortStateCKReversals = { key: 'local_30d_low', dir: 'asc' };
 
-  function renderCKTable(){
-    const tbody = document.querySelector('#ck-table tbody');
-    const rows = latestCKRows.slice();
-    applySort(rows, sortStateCK);
-    tbody.innerHTML = '';
-    // compute per-column min/max for drawdown and pullback to scale colors
-    let ddMin = null, ddMax = null, pbMin = null, pbMax = null;
-    for (const r of rows){
-      const dd = (typeof r.drawdown_15m_200_pct === 'number') ? r.drawdown_15m_200_pct : null;
-      const pb = (typeof r.pullback_15m_200_pct === 'number') ? r.pullback_15m_200_pct : null;
-      if (dd != null){ if (ddMin == null || dd < ddMin) ddMin = dd; if (ddMax == null || dd > ddMax) ddMax = dd; }
-      if (pb != null){ if (pbMin == null || pb < pbMin) pbMin = pb; if (pbMax == null || pb > pbMax) pbMax = pb; }
-    }
-    // set sensible defaults if no range found
-    if (ddMin == null) { ddMin = -20; ddMax = 0; }
-    if (pbMin == null) { pbMin = 0; pbMax = 20; }
+  function renderCKRowHtml(r) {
+    const buyDisabled = (typeof r.last_price === 'number') ? '' : 'disabled';
+    return `<td>${r.symbol}</td><td><span class="badge rank">${r.rank_gm != null ? r.rank_gm.toFixed(2) : ''}</span></td><td>${r.last_price!=null? r.last_price.toFixed(2): ''}</td><td>${r.rsi_15m!=null? r.rsi_15m.toFixed(2): ''}</td><td>${r.local_30d_low!=null? r.local_30d_low.toFixed(2)+'%': ''}</td><td>${r.local_30d_high!=null? r.local_30d_high.toFixed(2)+'%': ''}</td><td>${r.trading_zone_pct!=null? (r.trading_zone_pct*100).toFixed(2)+'%': ''}</td><td>${r.signal||''}</td><td>${r.action||''}</td><td><button class="btn small" onclick="placeBuy('${r.symbol}', this)" ${buyDisabled}>Buy</button></td>`;
+  }
 
-    for (const r of rows){
+  function renderCKTables(){
+    // Momentum table: Filter for momentum stocks (rank_gm > 0, bullish signals)
+    const momentumRows = latestCKRows.filter(r => {
+      // Momentum: positive rank, RSI > 40, bullish signal
+      return (r.rank_gm != null && r.rank_gm > 0) || 
+             (r.signal && (r.signal.includes('Bull') || r.signal === 'Neutral'));
+    });
+    applySort(momentumRows, sortStateCKMomentum);
+    const tbodyMomentum = document.querySelector('#ck-table-momentum tbody');
+    tbodyMomentum.innerHTML = '';
+    for (const r of momentumRows){
       const tr = document.createElement('tr');
-      const dd = (typeof r.drawdown_15m_200_pct === 'number') ? r.drawdown_15m_200_pct : null;
-      const pb = (typeof r.pullback_15m_200_pct === 'number') ? r.pullback_15m_200_pct : null;
-      const ddStyle = dd != null ? `style="color: ${inversePctColor(dd, ddMin, ddMax)};"` : '';
-      const pbStyle = pb != null ? `style="color: ${pctColor(pb, pbMin, pbMax)};"` : '';
-      tr.innerHTML = `<td>${r.symbol}</td><td>${r.last_price!=null? r.last_price.toFixed(2): ''}</td><td>${r.rsi_15m!=null? r.rsi_15m.toFixed(2): ''}</td><td>${r.local_30d_low!=null? r.local_30d_low.toFixed(2): ''}</td><td>${r.local_30d_high!=null? r.local_30d_high.toFixed(2): ''}</td><td>${r.trading_zone_pct!=null? (r.trading_zone_pct*100).toFixed(2)+'%': ''}</td><td ${ddStyle}>${dd!=null? dd.toFixed(2)+'%': ''}</td><td ${pbStyle}>${pb!=null? pb.toFixed(2)+'%': ''}</td><td>${r.signal||''}</td><td>${r.action||''}</td>`;
-      tbody.appendChild(tr);
+      tr.innerHTML = renderCKRowHtml(r);
+      tbodyMomentum.appendChild(tr);
+    }
+
+    // Reversals at Levels table: Filter for stocks near support (local_30d_low < 5%)
+    const reversalsRows = latestCKRows.filter(r => {
+      // Near 30d low (within 5%) or oversold RSI
+      return (r.local_30d_low != null && r.local_30d_low <= 5) ||
+             (r.rsi_15m != null && r.rsi_15m < 35);
+    });
+    applySort(reversalsRows, sortStateCKReversals);
+    const tbodyReversals = document.querySelector('#ck-table-reversals tbody');
+    tbodyReversals.innerHTML = '';
+    for (const r of reversalsRows){
+      const tr = document.createElement('tr');
+      tr.innerHTML = renderCKRowHtml(r);
+      tbodyReversals.appendChild(tr);
     }
   }
 
@@ -584,30 +655,44 @@
       if (!res.ok) throw new Error(j.error || 'Failed to fetch CK');
       const data = j.data || {};
       const syms = Object.keys(data).sort();
+      // Build a map of rank_gm from latestRows (main LTP data)
+      const rankMap = {};
+      for (const row of latestRows) {
+        if (row.symbol && row.rank_gm != null) {
+          rankMap[row.symbol] = row.rank_gm;
+        }
+      }
       latestCKRows = syms.map(s=>{
         const info = data[s] || {};
         return {
           symbol: s,
+          rank_gm: rankMap[s] != null ? rankMap[s] : null,
           last_price: (typeof info.last_price==='number')? info.last_price : (info.last_price? Number(info.last_price): null),
           rsi_15m: (typeof info.rsi_15m==='number')? info.rsi_15m : (info.rsi_15m? Number(info.rsi_15m): null),
           local_30d_low: info.local_30d_low != null ? info.local_30d_low : null,
           local_30d_high: info.local_30d_high != null ? info.local_30d_high : null,
           trading_zone_pct: info.trading_zone_pct != null ? info.trading_zone_pct : null,
+          drawdown_15m_200_pct: info.drawdown_15m_200_pct != null ? info.drawdown_15m_200_pct : null,
+          pullback_15m_200_pct: info.pullback_15m_200_pct != null ? info.pullback_15m_200_pct : null,
           signal: info.signal || '',
           action: info.action || ''
         };
       });
-      renderCKTable();
+      renderCKTables();
     }catch(e){
-      const tbody = document.querySelector('#ck-table tbody'); if (tbody) tbody.innerHTML = `<tr><td colspan="8" class="muted">${e.message}</td></tr>`;
+      const tbodyM = document.querySelector('#ck-table-momentum tbody'); 
+      const tbodyR = document.querySelector('#ck-table-reversals tbody'); 
+      if (tbodyM) tbodyM.innerHTML = `<tr><td colspan="10" class="muted">${e.message}</td></tr>`;
+      if (tbodyR) tbodyR.innerHTML = `<tr><td colspan="10" class="muted">${e.message}</td></tr>`;
     }
     // polling management: if CK view visible, ensure interval running
     try{ clearInterval(ckInterval); }catch(e){}
     if (document.getElementById('view-ck').style.display==='block') ckInterval = setInterval(fetchCK, 10000);
   }
 
-  // Attach sorting to CK table (after renderCKTable and sortStateCK exist)
-  attachSortingFor('ck-table', sortStateCK, renderCKTable);
+  // Attach sorting to CK tables
+  attachSortingFor('ck-table-momentum', sortStateCKMomentum, renderCKTables);
+  attachSortingFor('ck-table-reversals', sortStateCKReversals, renderCKTables);
 
   // Filters handlers
       document.getElementById('apply-filters').addEventListener('click', ()=> renderFilteredTable());
@@ -741,30 +826,35 @@
       // Active orderbook logic (broker active orders + GTTs)
       async function fetchActiveOrderbook(){
         try{
-          const [obRes, gttRes] = await Promise.all([fetch('/api/orderbook'), fetch('/api/gtt')]);
+          const [obRes, gttRes, ltpRes] = await Promise.all([fetch('/api/orderbook'), fetch('/api/gtt'), fetch('/api/ltp')]);
           const obJson = await obRes.json();
           const gttJson = await gttRes.json();
+          const ltpJson = ltpRes.ok ? await ltpRes.json() : {};
           if (!obRes.ok) throw new Error(obJson.error || 'Orderbook fetch failed');
           if (!gttRes.ok) throw new Error(gttJson.error || 'GTT fetch failed');
-          renderActiveOrders(obJson.orders || []);
-          renderActiveGTTs(gttJson.gtts || gttJson || []);
+          const ltpData = ltpJson.data || {};
+          renderActiveOrders(obJson.orders || [], ltpData);
+          renderActiveGTTs(gttJson.items || gttJson.gtts || gttJson || [], ltpData);
         }catch(e){
-          const tbody = document.querySelector('#active-orders-table tbody'); if (tbody) tbody.innerHTML = `<tr><td colspan="7" class="muted">${e.message}</td></tr>`;
-          const gtbody = document.querySelector('#active-gtt-table tbody'); if (gtbody) gtbody.innerHTML = `<tr><td colspan="6" class="muted">${e.message}</td></tr>`;
+          const tbody = document.querySelector('#active-orders-table tbody'); if (tbody) tbody.innerHTML = `<tr><td colspan="8" class="muted">${e.message}</td></tr>`;
+          const gtbody = document.querySelector('#active-gtt-table tbody'); if (gtbody) gtbody.innerHTML = `<tr><td colspan="8" class="muted">${e.message}</td></tr>`;
         }
       }
 
-      function renderActiveOrders(orders){
+      function renderActiveOrders(orders, ltpData){
+        ltpData = ltpData || {};
         const tbody = document.querySelector('#active-orders-table tbody'); tbody.innerHTML = '';
-        if (!orders || orders.length===0){ tbody.innerHTML = '<tr><td colspan="7" class="muted">No active orders</td></tr>'; return; }
+        if (!orders || orders.length===0){ tbody.innerHTML = '<tr><td colspan="8" class="muted">No active orders</td></tr>'; return; }
         for (const o of orders){
           const tr = document.createElement('tr');
           const sym = o.tradingsymbol || o.symbol || o.instrument_token || '';
+          const ltp = ltpData[sym] && ltpData[sym].last_price ? ltpData[sym].last_price.toFixed(2) : '';
           tr.innerHTML = `
             <td>${sym}</td>
             <td>${o.order_id||o.orderId||''}</td>
             <td>${o.quantity||o.qty||o.pending_qty||''}</td>
             <td>${o.price||o.avg_price||''}</td>
+            <td class="num">${ltp}</td>
             <td>${o.status||''}</td>
             <td>${o.order_type||o.type||''}</td>
             <td>
@@ -775,28 +865,120 @@
         }
       }
 
-      function renderActiveGTTs(gtts){
+      function renderActiveGTTs(gtts, ltpData){
+        ltpData = ltpData || {};
         const tbody = document.querySelector('#active-gtt-table tbody'); tbody.innerHTML = '';
-        if (!gtts || Object.keys(gtts).length===0){ tbody.innerHTML = '<tr><td colspan="6" class="muted">No GTT orders</td></tr>'; return; }
+        if (!gtts || Object.keys(gtts).length===0){ tbody.innerHTML = '<tr><td colspan="9" class="muted">No GTT orders</td></tr>'; return; }
         // gtts may be array or object keyed by id/symbol
-        const list = Array.isArray(gtts) ? gtts : (gtts.gtts || Object.values(gtts));
-        if (!list || list.length===0){ tbody.innerHTML = '<tr><td colspan="6" class="muted">No GTT orders</td></tr>'; return; }
+        const list = Array.isArray(gtts) ? gtts : (gtts.items || gtts.gtts || Object.values(gtts));
+        if (!list || list.length===0){ tbody.innerHTML = '<tr><td colspan="9" class="muted">No GTT orders</td></tr>'; return; }
         for (const g of list){
-          const sym = g.symbol || g.tradingsymbol || (g.trigger && g.trigger.tradingsymbol) || '';
-          const gid = g.id || g.gtt_id || g.gttId || g.trigger_id || '';
-          const trigger = (g.trigger && (g.trigger.trigger_values || g.trigger.trigger_price)) || g.trigger_values || g.trigger_price || '';
-          const typ = g.type || g.order_type || (g.trigger && g.trigger.type) || '';
+          // Handle Kite GTT structure: tradingsymbol and trigger_values are inside 'condition' object
+          const condition = g.condition || {};
+          const sym = condition.tradingsymbol || g.tradingsymbol || g.symbol || '';
+          const gid = g.id || g.gtt_id || g.trigger_id || '';
+          const triggerValues = condition.trigger_values || g.trigger_values || [];
+          const typ = g.type || g.trigger_type || '';
           const status = g.status || g.state || '';
+          
+          // Get quantity from orders array
+          const orders = g.orders || [];
+          let qty = '';
+          if (Array.isArray(orders) && orders.length > 0) {
+            qty = orders[0].quantity || orders[0].qty || '';
+          }
+          
+          // Get LTP for this symbol
+          const ltpInfo = ltpData[sym] || {};
+          const ltp = typeof ltpInfo.last_price === 'number' ? ltpInfo.last_price : null;
+          const ltpStr = ltp !== null ? ltp.toFixed(2) : '';
+          
+          // Parse stop and target from trigger_values
+          // For OCO/two-leg: typically [stop, target] where stop < target
+          // For single: just one value
+          let stopPrice = null;
+          let targetPrice = null;
+          
+          if (Array.isArray(triggerValues) && triggerValues.length > 0) {
+            const vals = triggerValues.map(v => parseFloat(v)).filter(v => !isNaN(v)).sort((a,b) => a - b);
+            if (vals.length >= 2) {
+              // OCO: lower is stop, higher is target
+              stopPrice = vals[0];
+              targetPrice = vals[vals.length - 1];
+            } else if (vals.length === 1) {
+              // Single: assume it's a stop
+              stopPrice = vals[0];
+            }
+          }
+          
+          // Calculate % distance from LTP and color-code
+          let stopStr = stopPrice !== null ? stopPrice.toFixed(2) : '';
+          let targetStr = targetPrice !== null ? targetPrice.toFixed(2) : '';
+          let stopStyle = '';
+          let targetStyle = '';
+          
+          if (ltp !== null && stopPrice !== null) {
+            const stopPct = ((ltp - stopPrice) / ltp * 100).toFixed(1);
+            stopStr = `${stopPrice.toFixed(2)} (${stopPct}%)`;
+            // Color: red if close to stop (< 2%), yellow if < 5%, else green
+            if (parseFloat(stopPct) < 2) stopStyle = 'color: var(--danger); font-weight: 600;';
+            else if (parseFloat(stopPct) < 5) stopStyle = 'color: #b8860b; font-weight: 600;';
+            else stopStyle = 'color: var(--success);';
+          }
+          
+          if (ltp !== null && targetPrice !== null) {
+            const targetPct = ((targetPrice - ltp) / ltp * 100).toFixed(1);
+            targetStr = `${targetPrice.toFixed(2)} (${targetPct}%)`;
+            // Color: green if close to target (< 2%), yellow if < 5%, else muted
+            if (parseFloat(targetPct) < 2) targetStyle = 'color: var(--success); font-weight: 600;';
+            else if (parseFloat(targetPct) < 5) targetStyle = 'color: #b8860b; font-weight: 600;';
+          }
+          
           const tr = document.createElement('tr');
+          // Determine GTT type for trailing: 'oco' for two-leg, 'single' otherwise
+          const gttType = (typ === 'two-leg' || triggerValues.length >= 2) ? 'oco' : 'single';
           tr.innerHTML = `
             <td>${sym}</td>
             <td>${gid}</td>
-            <td>${Array.isArray(trigger)? trigger.join('/') : trigger}</td>
+            <td class="num">${qty}</td>
+            <td class="num">${ltpStr}</td>
+            <td class="num" style="${stopStyle}">${stopStr}</td>
+            <td class="num" style="${targetStyle}">${targetStr}</td>
             <td>${typ}</td>
             <td>${status}</td>
-            <td>${gid? `<button class="btn small secondary" onclick="cancelGTT('${gid}','${sym}', this)">Cancel GTT</button>` : ''}</td>
+            <td>
+              ${gid && sym && qty && stopPrice ? `<button class="btn small" onclick="startTrailing('${sym}','${gid}','${qty}','${stopPrice}','${gttType}','${targetPrice || 0}', this)" title="Enable trailing stop">Trail</button>` : ''}
+              ${gid? `<button class="btn small secondary" onclick="cancelGTT('${gid}','${sym}', this)">Cancel</button>` : ''}
+            </td>
           `;
           tbody.appendChild(tr);
+        }
+      }
+
+      // Start trailing for an existing GTT
+      async function startTrailing(symbol, gttId, qty, stopPrice, gttType, targetPrice, btn) {
+        try {
+          if (!symbol || !gttId) return;
+          if (btn) { btn.disabled = true; btn.textContent = 'Starting…'; }
+          const res = await fetch('/api/trailing/start', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+              symbol: symbol,
+              gtt_id: gttId,
+              qty: parseInt(qty),
+              stop_price: parseFloat(stopPrice),
+              gtt_type: gttType,
+              target_price: targetPrice ? parseFloat(targetPrice) : null
+            })
+          });
+          const j = await res.json();
+          if (!res.ok) throw new Error(j.error || 'Failed to start trailing');
+          alert(`Trailing started for ${symbol}`);
+          if (btn) { btn.textContent = 'Trailing'; btn.classList.add('active'); }
+        } catch(e) {
+          alert(`Error: ${e.message || e}`);
+          if (btn) { btn.disabled = false; btn.textContent = 'Trail'; }
         }
       }
 
