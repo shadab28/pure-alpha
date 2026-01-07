@@ -66,6 +66,11 @@ _volratio_cache: Dict[str, float] = {}
 _volratio_last_ts: Optional[datetime] = None
 _volratio_lock = threading.RLock()
 
+# Daily simple moving averages cache (5,8,10 day)
+_daily_avg_cache: Dict[str, Dict[str, Optional[float]]] = {}
+_daily_avg_last_ts: Optional[datetime] = None
+_daily_avg_lock = threading.RLock()
+
 # Days since last Golden Cross (SMA50 crossed above SMA200) per symbol
 _days_since_gc_cache: Dict[str, Optional[int]] = {}
 _days_since_gc_last_ts: Optional[datetime] = None
@@ -379,6 +384,77 @@ def _refresh_daily_volratio_if_needed(symbols: List[str]):
                     continue
             _volratio_last_ts = now
     except Exception:
+        pass
+
+
+def _refresh_daily_averages_if_needed(symbols: List[str]):
+    """Compute simple moving averages (5,8,10 day) per symbol using daily ohlcv_data.
+
+    Results are cached in _daily_avg_cache and refreshed at most once every 15 minutes.
+    """
+    if not test_connection() or pg_cursor is None:
+        return
+    global _daily_avg_last_ts
+    now = datetime.now()
+    # Refresh at most once every 15 minutes
+    if _daily_avg_last_ts and (now - _daily_avg_last_ts) < timedelta(minutes=15):
+        return
+    try:
+        with pg_cursor() as (cur, _):
+            # Fetch recent daily closes per requested symbol (newest first)
+            cur.execute(
+                """
+                SELECT stockname, array_agg(close ORDER BY candle_stock DESC) AS closes
+                FROM ohlcv_data
+                WHERE timeframe='1d' AND stockname = ANY(%s)
+                GROUP BY stockname
+                """,
+                (symbols,)
+            )
+            rows = cur.fetchall()
+
+        def compute_emas_from_closes(closes_list, periods):
+            # closes_list expected chronological oldest->newest
+            res = {}
+            for p in periods:
+                if len(closes_list) < p:
+                    res[p] = None
+                    continue
+                # seed EMA with simple average of first p values
+                seed = sum(closes_list[:p]) / float(p)
+                ema = seed
+                k = 2.0 / (p + 1)
+                for price in closes_list[p:]:
+                    ema = (price - ema) * k + ema
+                res[p] = ema
+            return res
+
+        periods = [5, 8, 10, 20, 50, 100, 200]
+        with _daily_avg_lock:
+            _daily_avg_cache.clear()
+            for stockname, closes_arr in rows:
+                try:
+                    closes_raw = list(closes_arr or [])
+                    # convert to floats and reverse to chronological order
+                    closes = [float(x) for x in closes_raw]
+                    closes = list(reversed(closes))
+                    emas = compute_emas_from_closes(closes, periods)
+                    entry = {
+                        'ema5': round(emas[5], 6) if emas.get(5) is not None else None,
+                        'ema8': round(emas[8], 6) if emas.get(8) is not None else None,
+                        'ema10': round(emas[10], 6) if emas.get(10) is not None else None,
+                        'ema20': round(emas[20], 6) if emas.get(20) is not None else None,
+                        'ema50': round(emas[50], 6) if emas.get(50) is not None else None,
+                        'ema100': round(emas[100], 6) if emas.get(100) is not None else None,
+                        'ema200': round(emas[200], 6) if emas.get(200) is not None else None,
+                        'updated': now,
+                    }
+                    _daily_avg_cache[stockname] = entry
+                except Exception:
+                    _daily_avg_cache[stockname] = {'ema5': None, 'ema8': None, 'ema10': None, 'ema20': None, 'ema50': None, 'ema100': None, 'ema200': None, 'updated': now}
+            _daily_avg_last_ts = now
+    except Exception:
+        # Ignore DB failures silently; caller will handle missing values
         pass
 
 
@@ -734,6 +810,11 @@ def get_ck_data() -> Dict[str, Any]:
         return {"error": str(e)}
     data = ltp_resp.get('data', {})
     out = {}
+    # Best-effort refresh of daily averages (EMAs)
+    try:
+        _refresh_daily_averages_if_needed(list(data.keys()))
+    except Exception:
+        pass
     for sym, info in data.items():
         last_price = info.get('last_price')
         rsi = _rsi15m_cache.get(sym)
@@ -821,4 +902,23 @@ def get_ck_data() -> Dict[str, Any]:
                     out[sym]['trading_zone_pct'] = None
         except Exception:
             pass
+        # Attach daily EMAs if available (may be None)
+        try:
+            with _daily_avg_lock:
+                darr = _daily_avg_cache.get(sym) or {}
+            out[sym]['ema5'] = darr.get('ema5') if darr else None
+            out[sym]['ema8'] = darr.get('ema8') if darr else None
+            out[sym]['ema10'] = darr.get('ema10') if darr else None
+            out[sym]['ema20'] = darr.get('ema20') if darr else None
+            out[sym]['ema50'] = darr.get('ema50') if darr else None
+            out[sym]['ema100'] = darr.get('ema100') if darr else None
+            out[sym]['ema200'] = darr.get('ema200') if darr else None
+        except Exception:
+            out[sym]['ema5'] = None
+            out[sym]['ema8'] = None
+            out[sym]['ema10'] = None
+            out[sym]['ema20'] = None
+            out[sym]['ema50'] = None
+            out[sym]['ema100'] = None
+            out[sym]['ema200'] = None
     return {"count": len(out), "data": out}

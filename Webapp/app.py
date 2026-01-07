@@ -467,8 +467,8 @@ def api_start_trailing():
 		ticks = _load_tick_sizes(inst_csv)
 		tick = ticks.get(symbol) or _fallback_tick_by_price(ltp)
 		
-		# Start trailing
-		_start_trailing(kite, symbol, qty, sl_pct, ltp=ltp, tick=tick, gtt_id=str(gtt_id), gtt_type=gtt_type, target_pct=target_pct)
+		# Start trailing - use stop_price as initial trigger so it knows where the GTT currently is
+		_start_trailing(kite, symbol, qty, sl_pct, ltp=ltp, tick=tick, gtt_id=str(gtt_id), gtt_type=gtt_type, target_pct=target_pct, initial_trigger=stop_price)
 		
 		trail_logger.info("TRAIL_STARTED symbol=%s gtt_id=%s qty=%d sl_pct=%.3f ltp=%.2f type=%s", 
 						  symbol, gtt_id, qty, sl_pct, ltp, gtt_type)
@@ -596,14 +596,22 @@ def api_holdings():
 			for h in holdings:
 				try:
 					s = h.get('tradingsymbol') or h.get('symbol')
-					qty = h.get('quantity')
-					avg = h.get('average_price') if 'average_price' in h else h.get('average')
+					# Use opening_quantity (includes T+1) or sum of quantity + t1_quantity
+					qty = h.get('opening_quantity')
+					if qty is None:
+						settled_qty = h.get('quantity') or 0
+						t1_qty = h.get('t1_quantity') or 0
+						if isinstance(settled_qty, (int, float)) and isinstance(t1_qty, (int, float)):
+							qty = int(settled_qty) + int(t1_qty)
 					qty = int(qty) if isinstance(qty, (int, float, str)) and str(qty).strip() != '' else None
+					# Store total_quantity for frontend use
+					h['total_quantity'] = qty
+					avg = h.get('average_price') if 'average_price' in h else h.get('average')
 					avgf = float(avg) if isinstance(avg, (int, float, str)) and str(avg).strip() != '' else None
 					ltp = ltp_map.get(s)
 					if isinstance(ltp, (int, float)):
 						h['last_price'] = float(ltp)
-					# Compute Holding PnL when possible
+					# Compute Holding PnL using total quantity (including T+1)
 					pnl = None
 					pnl_pct = None
 					if qty is not None and avgf is not None and isinstance(ltp, (int, float)):
@@ -815,8 +823,9 @@ def _place_bracket_oco_gtt(kite, symbol: str, qty: int, ref_price: float, target
 
 
 # ---------- Trailing GTT manager (best-effort client-side) ---------- 
+# Now keyed by gtt_id to support multiple GTTs per symbol
 _trail_lock = None
-_trail_state = {}
+_trail_state = {}  # key: gtt_id, value: {symbol, qty, sl_pct, tick, trigger, gtt_type, target_pct}
 _trail_thread_started = False
 
 def _trail_lock_obj():
@@ -838,12 +847,13 @@ def _ensure_trailer_thread(kite):
 		while True:
 			try:
 				with _trail_lock_obj():
-					items = list(_trail_state.items())
+					items = list(_trail_state.items())  # items: [(gtt_id, state_dict), ...]
 				if not items:
 					time.sleep(30)
 					continue
-				# Batch quote request
-				syms = [f"NSE:{k}" for k,_ in items]
+				# Batch quote request - get unique symbols from all tracked GTTs
+				symbols_to_quote = list(set(st.get('symbol') for _, st in items if st.get('symbol')))
+				syms = [f"NSE:{s}" for s in symbols_to_quote]
 				qd = {}
 				try:
 					qd = kite.quote(syms) or {}
@@ -857,7 +867,10 @@ def _ensure_trailer_thread(kite):
 					ltp_data = fetch_ltp().get('data', {})
 				except Exception:
 					ltp_data = None
-				for sym, st in items:
+				for gtt_id, st in items:
+					sym = st.get('symbol')
+					if not sym:
+						continue
 					q = qd.get(f"NSE:{sym}") or {}
 					ltp = q.get('last_price')
 					# prefer app data LTP when available
@@ -869,101 +882,106 @@ def _ensure_trailer_thread(kite):
 					if not isinstance(ltp, (int,float)) or ltp <= 0:
 						continue
 					
-					# Only trail if LTP has moved at least 0.1% above current stop trigger
-					# This reduces unnecessary API calls and GTT modifications
+					# Trailing logic: only modify GTT if gap between LTP and stop exceeds 5%
+					# If gap is under 5%, do nothing. If gap > 5%, bring stop back to 5% below LTP.
 					current_trigger = st.get('trigger')
-					min_trail_threshold = 0.001  # 0.1% minimum movement required
+					TRAIL_THRESHOLD = 0.05  # Fixed 5% threshold for trailing
 					
-					if current_trigger is not None and current_trigger > 0:
-						# Calculate how much LTP has moved above the stop
-						pct_above_stop = (ltp - current_trigger) / current_trigger
-						# Only trail if LTP is at least 0.1% higher than what would trigger a new stop
-						# New stop would be at ltp * (1 - sl_pct), so we need LTP to be meaningfully higher
-						if pct_above_stop < (st['sl_pct'] + min_trail_threshold):
-							# LTP hasn't moved enough to warrant trailing
-							continue
+					if current_trigger is None or current_trigger <= 0:
+						# No trigger set yet, initialize it
+						new_trig = _round_to_tick(ltp * (1 - TRAIL_THRESHOLD), st['tick'])
+						st['trigger'] = new_trig
+						continue
 					
-					# compute desired new trigger
-					new_trig = _round_to_tick(ltp * (1 - st['sl_pct']), st['tick'])
+					# Calculate current gap: how far is LTP above the stop (as % of LTP)
+					current_gap_pct = (ltp - current_trigger) / ltp
 					
-					# Only update if new trigger is at least 0.1% higher than current
-					if current_trigger is not None and current_trigger > 0:
-						trigger_increase_pct = (new_trig - current_trigger) / current_trigger
-						if trigger_increase_pct < min_trail_threshold:
-							# New trigger isn't meaningfully higher, skip update
-							continue
+					# Only modify if gap exceeds 5% threshold
+					if current_gap_pct <= TRAIL_THRESHOLD:
+						# Gap is within acceptable range, do nothing
+						continue
 					
-					if st.get('trigger') is None or new_trig > st['trigger']:
-						# raise SL by modifying/replacing GTT
-						try:
-							gtt_type = st.get('gtt_type', 'single')  # default to single for backward compat
-							if hasattr(kite, 'modify_gtt') and st.get('gtt_id'):
-								if gtt_type == 'oco':
-									# OCO GTT: update both stop and target triggers
-									# Target stays at original % above current LTP
-									target_pct = st.get('target_pct', 0.075)
-									new_target = _round_to_tick(ltp * (1 + target_pct), st['tick'])
-									resp = kite.modify_gtt(
-										trigger_id=st['gtt_id'],
-										trigger_type=kite.GTT_TYPE_OCO,
-										tradingsymbol=sym,
-										exchange='NSE',
-										trigger_values=[new_trig, new_target],
-										last_price=ltp,
-										orders=[
-											{
-												"transaction_type": kite.TRANSACTION_TYPE_SELL,
-												"quantity": st['qty'],
-												"product": kite.PRODUCT_CNC,
-												"order_type": kite.ORDER_TYPE_LIMIT,
-												"price": new_trig,
-											},
-											{
-												"transaction_type": kite.TRANSACTION_TYPE_SELL,
-												"quantity": st['qty'],
-												"product": kite.PRODUCT_CNC,
-												"order_type": kite.ORDER_TYPE_LIMIT,
-												"price": new_target,
-											},
-										]
-									)
-									trail_logger.info("TRAIL_MODIFY_OCO symbol=%s gtt_id=%s stop=%.2f target=%.2f", sym, st.get('gtt_id'), new_trig, new_target)
-								else:
-									# Single-leg GTT
-									resp = kite.modify_gtt(
-										trigger_id=st['gtt_id'],
-										trigger_type=kite.GTT_TYPE_SINGLE,
-										tradingsymbol=sym,
-										exchange='NSE',
-										trigger_values=[new_trig],
-										last_price=ltp,
-										orders=[{
+					# Gap exceeded 5%, bring stop back to exactly 5% below LTP
+					new_trig = _round_to_tick(ltp * (1 - TRAIL_THRESHOLD), st['tick'])
+					
+					# Safety: never lower the stop, only raise it
+					if new_trig <= current_trigger:
+						continue
+					
+					# Log the trailing action
+					trail_logger.info("TRAIL_CHECK symbol=%s gtt_id=%s ltp=%.2f current_stop=%.2f gap=%.1f%% new_stop=%.2f", 
+						sym, gtt_id, ltp, current_trigger, current_gap_pct*100, new_trig)
+					
+					# raise SL by modifying/replacing GTT
+					try:
+						gtt_type = st.get('gtt_type', 'single')  # default to single for backward compat
+						if hasattr(kite, 'modify_gtt') and st.get('gtt_id'):
+							if gtt_type == 'oco':
+								# OCO GTT: update both stop and target triggers
+								# Target stays at original % above current LTP
+								target_pct = st.get('target_pct', 0.075)
+								new_target = _round_to_tick(ltp * (1 + target_pct), st['tick'])
+								resp = kite.modify_gtt(
+									trigger_id=st['gtt_id'],
+									trigger_type=kite.GTT_TYPE_OCO,
+									tradingsymbol=sym,
+									exchange='NSE',
+									trigger_values=[new_trig, new_target],
+									last_price=ltp,
+									orders=[
+										{
 											"transaction_type": kite.TRANSACTION_TYPE_SELL,
 											"quantity": st['qty'],
 											"product": kite.PRODUCT_CNC,
 											"order_type": kite.ORDER_TYPE_LIMIT,
 											"price": new_trig,
-										}]
-									)
-									trail_logger.info("TRAIL_MODIFY symbol=%s gtt_id=%s trigger=%.2f", sym, st.get('gtt_id'), new_trig)
-								with _trail_lock_obj():
-									st['trigger'] = new_trig
+										},
+										{
+											"transaction_type": kite.TRANSACTION_TYPE_SELL,
+											"quantity": st['qty'],
+											"product": kite.PRODUCT_CNC,
+											"order_type": kite.ORDER_TYPE_LIMIT,
+											"price": new_target,
+										},
+									]
+								)
+								trail_logger.info("TRAIL_MODIFY_OCO symbol=%s gtt_id=%s stop=%.2f target=%.2f", sym, st.get('gtt_id'), new_trig, new_target)
 							else:
-								# replace: delete old and place new
-								if st.get('gtt_id') and hasattr(kite, 'delete_gtt'):
-									try:
-										kite.delete_gtt(st['gtt_id'])
-									except Exception:
-										pass
-								new_id = _place_sl_gtt(kite, sym, st['qty'], ref_price=ltp, sl_pct=st['sl_pct'])
-								with _trail_lock_obj():
-									st['gtt_id'] = new_id
-									st['trigger'] = new_trig
-									st['gtt_type'] = 'single'  # replaced with single-leg
-								trail_logger.info("TRAIL_REPLACE symbol=%s gtt_id=%s trigger=%.2f", sym, new_id, new_trig)
-						except Exception as e:
-							trail_logger.error("TRAIL_UPDATE_FAIL symbol=%s err=%s", sym, e)
-					time.sleep(30)
+								# Single-leg GTT
+								resp = kite.modify_gtt(
+									trigger_id=st['gtt_id'],
+									trigger_type=kite.GTT_TYPE_SINGLE,
+									tradingsymbol=sym,
+									exchange='NSE',
+									trigger_values=[new_trig],
+									last_price=ltp,
+									orders=[{
+										"transaction_type": kite.TRANSACTION_TYPE_SELL,
+										"quantity": st['qty'],
+										"product": kite.PRODUCT_CNC,
+										"order_type": kite.ORDER_TYPE_LIMIT,
+										"price": new_trig,
+									}]
+								)
+								trail_logger.info("TRAIL_MODIFY symbol=%s gtt_id=%s trigger=%.2f", sym, st.get('gtt_id'), new_trig)
+							with _trail_lock_obj():
+								st['trigger'] = new_trig
+						else:
+							# replace: delete old and place new
+							if st.get('gtt_id') and hasattr(kite, 'delete_gtt'):
+								try:
+									kite.delete_gtt(st['gtt_id'])
+								except Exception:
+									pass
+							new_id = _place_sl_gtt(kite, sym, st['qty'], ref_price=ltp, sl_pct=st['sl_pct'])
+							with _trail_lock_obj():
+								st['gtt_id'] = new_id
+								st['trigger'] = new_trig
+								st['gtt_type'] = 'single'  # replaced with single-leg
+							trail_logger.info("TRAIL_REPLACE symbol=%s gtt_id=%s trigger=%.2f", sym, new_id, new_trig)
+					except Exception as e:
+						trail_logger.error("TRAIL_UPDATE_FAIL symbol=%s err=%s", sym, e)
+				time.sleep(30)
 			except Exception as e:
 				trail_logger.exception("TRAIL_LOOP_ERR %s", e)
 				time.sleep(30)
@@ -971,25 +989,32 @@ def _ensure_trailer_thread(kite):
 	threading.Thread(target=worker, name="gtt_trailer", daemon=True).start()
 
 
-def _start_trailing(kite, symbol: str, qty: int, sl_pct: float, ltp: float, tick: float, gtt_id: str|None, gtt_type: str = 'oco', target_pct: float = 0.075):
+def _start_trailing(kite, symbol: str, qty: int, sl_pct: float, ltp: float, tick: float, gtt_id: str|None, gtt_type: str = 'oco', target_pct: float = 0.075, initial_trigger: float|None = None):
+	if not gtt_id:
+		trail_logger.warning("Cannot start trailing without gtt_id for %s", symbol)
+		return
 	with _trail_lock_obj():
-		state = _trail_state.get(symbol) or {}
+		# Use gtt_id as key to support multiple GTTs per symbol
+		state = _trail_state.get(str(gtt_id)) or {}
+		# Use provided initial_trigger (from existing GTT stop) or compute from LTP
+		trigger = initial_trigger if initial_trigger is not None else _round_to_tick(ltp * (1 - sl_pct), tick)
 		state.update({
+			'symbol': symbol,  # Store symbol for quote lookups
 			'qty': qty,
 			'sl_pct': sl_pct,
 			'tick': tick,
-			'gtt_id': gtt_id,
-			'trigger': _round_to_tick(ltp * (1 - sl_pct), tick),
+			'gtt_id': str(gtt_id),
+			'trigger': trigger,
 			'gtt_type': gtt_type,
 			'target_pct': target_pct,
 		})
-		_trail_state[symbol] = state
+		_trail_state[str(gtt_id)] = state
 	_ensure_trailer_thread(kite)
 
 
 @app.post("/api/order/buy")
 def api_place_buy():
-	"""Place a CNC LIMIT buy at 2% below LTP with budget INR 10,000 (adjust quantity)."""
+	"""Place a CNC LIMIT buy at LTP with budget INR 10,000 (adjust quantity)."""
 	try:
 		payload = request.get_json(silent=True) or {}
 		symbol = (payload.get('symbol') or '').strip().upper()
@@ -1013,11 +1038,11 @@ def api_place_buy():
 		price_basis = ltp
 		limit_price = None
 		if not use_market:
-			# Tick rounding for limit entry
+			# Tick rounding for limit entry - place at LTP
 			inst_csv = os.path.join(REPO_ROOT, os.getenv('INSTRUMENTS_CSV', os.path.join('Csvs','instruments.csv')))
 			ticks = _load_tick_sizes(inst_csv)
 			tick = ticks.get(symbol) or _fallback_tick_by_price(ltp)
-			limit_price = _round_to_tick(ltp * (1 - offset_pct), tick)
+			limit_price = _round_to_tick(ltp, tick)
 			if limit_price <= 0:
 				return jsonify({"error": "Computed price invalid"}), 400
 			price_basis = limit_price
@@ -1206,12 +1231,14 @@ def api_orders():
 			status = od.get('status') or 'UNKNOWN'
 			avg_price = od.get('average_price') or od.get('average') or rec.get('limit_price')
 			qty = rec.get('quantity')
-			# trailing trigger from state
+			# trailing trigger from state - now keyed by gtt_id
 			trail_trigger = None
 			try:
-				st = _trail_state.get(symbol)
-				if st:
-					trail_trigger = st.get('trigger')
+				# Look for any trailing state matching this symbol
+				for gid, st in _trail_state.items():
+					if st.get('symbol') == symbol:
+						trail_trigger = st.get('trigger')
+						break
 			except Exception:
 				trail_trigger = None
 

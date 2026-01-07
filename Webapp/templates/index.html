@@ -105,6 +105,7 @@
           <div class="btn-row" style="margin-bottom:12px;">
             <button id="ck-subtab-momentum" class="btn small active">Momentum</button>
             <button id="ck-subtab-reversals" class="btn small secondary">Reversals at Levels</button>
+            <button id="ck-subtab-averages" class="btn small secondary">Averages</button>
           </div>
 
           <!-- Momentum sub-view -->
@@ -143,6 +144,26 @@
                   <th data-key="signal">Signal</th>
                   <th data-key="action">Action</th>
                   <th>Buy + SL 5% (₹10k)</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <!-- Averages sub-view -->
+          <div id="ck-view-averages" style="display:none;">
+            <table id="ck-table-averages">
+              <thead>
+                <tr>
+                  <th data-key="symbol">Symbol</th>
+                  <th data-key="last_price">Last Price</th>
+                  <th data-key="ema_signal">Uptrend Confirm</th>
+                  <th data-key="ema5">EMA 5d</th>
+                  <th data-key="ema8">EMA 8d</th>
+                  <th data-key="ema10">EMA 10d</th>
+                  <th data-key="ema20">EMA 20d</th>
+                  <th data-key="ema50">EMA 50d</th>
+                  <th data-key="ema100">EMA 100d</th>
+                  <th data-key="ema200">EMA 200d</th>
                 </tr>
               </thead>
               <tbody></tbody>
@@ -581,35 +602,41 @@
   let ckActiveSubtab = 'momentum'; // 'momentum' or 'reversals'
   const ckSubtabMomentum = document.getElementById('ck-subtab-momentum');
   const ckSubtabReversals = document.getElementById('ck-subtab-reversals');
+  const ckSubtabAverages = document.getElementById('ck-subtab-averages');
 
   function setCKSubtab(subtab) {
     ckActiveSubtab = subtab;
-    // Toggle sub-tab button styles
+    // Hide all CK views first
+    document.getElementById('ck-view-momentum').style.display = 'none';
+    document.getElementById('ck-view-reversals').style.display = 'none';
+    document.getElementById('ck-view-averages').style.display = 'none';
+    // Reset all sub-tab button styles
+    ckSubtabMomentum.classList.remove('active'); ckSubtabMomentum.classList.add('secondary');
+    ckSubtabReversals.classList.remove('active'); ckSubtabReversals.classList.add('secondary');
+    ckSubtabAverages.classList.remove('active'); ckSubtabAverages.classList.add('secondary');
+    // Show selected view and highlight its button
     if (subtab === 'momentum') {
-      ckSubtabMomentum.classList.remove('secondary');
-      ckSubtabMomentum.classList.add('active');
-      ckSubtabReversals.classList.remove('active');
-      ckSubtabReversals.classList.add('secondary');
+      ckSubtabMomentum.classList.remove('secondary'); ckSubtabMomentum.classList.add('active');
       document.getElementById('ck-view-momentum').style.display = 'block';
-      document.getElementById('ck-view-reversals').style.display = 'none';
-    } else {
-      ckSubtabReversals.classList.remove('secondary');
-      ckSubtabReversals.classList.add('active');
-      ckSubtabMomentum.classList.remove('active');
-      ckSubtabMomentum.classList.add('secondary');
-      document.getElementById('ck-view-momentum').style.display = 'none';
+    } else if (subtab === 'reversals') {
+      ckSubtabReversals.classList.remove('secondary'); ckSubtabReversals.classList.add('active');
       document.getElementById('ck-view-reversals').style.display = 'block';
+    } else if (subtab === 'averages') {
+      ckSubtabAverages.classList.remove('secondary'); ckSubtabAverages.classList.add('active');
+      document.getElementById('ck-view-averages').style.display = 'block';
     }
     renderCKTables();
   }
 
   if (ckSubtabMomentum) ckSubtabMomentum.addEventListener('click', () => setCKSubtab('momentum'));
   if (ckSubtabReversals) ckSubtabReversals.addEventListener('click', () => setCKSubtab('reversals'));
+  if (ckSubtabAverages) ckSubtabAverages.addEventListener('click', () => setCKSubtab('averages'));
 
   let ckInterval = null;
   let latestCKRows = [];
   let sortStateCKMomentum = { key: 'rank_gm', dir: 'desc' };
   let sortStateCKReversals = { key: 'local_30d_low', dir: 'asc' };
+  let sortStateCKAverages = { key: 'symbol', dir: 'asc' };
 
   function renderCKRowHtml(r) {
     const buyDisabled = (typeof r.last_price === 'number') ? '' : 'disabled';
@@ -646,6 +673,35 @@
       tr.innerHTML = renderCKRowHtml(r);
       tbodyReversals.appendChild(tr);
     }
+
+  // Averages table: show available EMAs (use latestCKRows order)
+    const averagesBody = document.querySelector('#ck-table-averages tbody');
+    if (averagesBody){
+      averagesBody.innerHTML = '';
+      // Sort using sortStateCKAverages (clickable headers)
+      const avgRows = latestCKRows.slice();
+      // Set ema_signal for sorting
+      for (const r of avgRows){
+        r.ema_signal = (typeof r.last_price==='number' && r.ema5!=null && r.ema8!=null && r.ema10!=null && (r.last_price>r.ema5 && r.ema5>r.ema8 && r.ema8>=r.ema10)) ? true : false;
+      }
+      applySort(avgRows, sortStateCKAverages);
+      for (const r of avgRows){
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td>${r.symbol}</td>
+          <td>${r.last_price!=null? r.last_price.toFixed(2): ''}</td>
+          <td style="color:${r.ema_signal ? 'hsl(120,70%,38%)' : 'inherit'}">${r.ema_signal ? 'True' : 'False'}</td>
+          <td>${r.ema5!=null? Number(r.ema5).toFixed(2): '<span class="muted">N/A</span>'}</td>
+          <td>${r.ema8!=null? Number(r.ema8).toFixed(2): '<span class="muted">N/A</span>'}</td>
+          <td>${r.ema10!=null? Number(r.ema10).toFixed(2): '<span class="muted">N/A</span>'}</td>
+          <td>${r.ema20!=null? Number(r.ema20).toFixed(2): '<span class="muted">N/A</span>'}</td>
+          <td>${r.ema50!=null? Number(r.ema50).toFixed(2): '<span class="muted">N/A</span>'}</td>
+          <td>${r.ema100!=null? Number(r.ema100).toFixed(2): '<span class="muted">N/A</span>'}</td>
+          <td>${r.ema200!=null? Number(r.ema200).toFixed(2): '<span class="muted">N/A</span>'}</td>
+        `;
+        averagesBody.appendChild(tr);
+      }
+    }
   }
 
   async function fetchCK(){
@@ -678,6 +734,17 @@
           action: info.action || ''
         };
       });
+      // Attach EMA fields to latestCKRows if present in API
+      for (const r of latestCKRows){
+        const inf = data[r.symbol] || {};
+        r.ema5 = (inf.ema5 != null) ? (typeof inf.ema5 === 'number' ? inf.ema5 : Number(inf.ema5)) : null;
+        r.ema8 = (inf.ema8 != null) ? (typeof inf.ema8 === 'number' ? inf.ema8 : Number(inf.ema8)) : null;
+        r.ema10 = (inf.ema10 != null) ? (typeof inf.ema10 === 'number' ? inf.ema10 : Number(inf.ema10)) : null;
+        r.ema20 = (inf.ema20 != null) ? (typeof inf.ema20 === 'number' ? inf.ema20 : Number(inf.ema20)) : null;
+        r.ema50 = (inf.ema50 != null) ? (typeof inf.ema50 === 'number' ? inf.ema50 : Number(inf.ema50)) : null;
+        r.ema100 = (inf.ema100 != null) ? (typeof inf.ema100 === 'number' ? inf.ema100 : Number(inf.ema100)) : null;
+        r.ema200 = (inf.ema200 != null) ? (typeof inf.ema200 === 'number' ? inf.ema200 : Number(inf.ema200)) : null;
+      }
       renderCKTables();
     }catch(e){
       const tbodyM = document.querySelector('#ck-table-momentum tbody'); 
@@ -693,6 +760,8 @@
   // Attach sorting to CK tables
   attachSortingFor('ck-table-momentum', sortStateCKMomentum, renderCKTables);
   attachSortingFor('ck-table-reversals', sortStateCKReversals, renderCKTables);
+  // attach sorting for averages table
+  attachSortingFor('ck-table-averages', sortStateCKAverages, renderCKTables);
 
   // Filters handlers
       document.getElementById('apply-filters').addEventListener('click', ()=> renderFilteredTable());
