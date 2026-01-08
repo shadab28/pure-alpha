@@ -136,8 +136,10 @@
                 <tr>
                   <th data-key="symbol">Symbol</th>
                   <th data-key="rank_gm">Rank (GM)</th>
+                  <th>User Support</th>
                   <th data-key="last_price">Last Price</th>
                   <th data-key="rsi_15m">RSI (15m)</th>
+                  <th>Major Support</th>
                   <th data-key="local_30d_low">Local 30d Low <br>(% above the low)</th>
                   <th data-key="local_30d_high">Local 30d High<br>(% below the high)</th>
                   <th data-key="trading_zone_pct">Trading Zone %</th>
@@ -370,6 +372,7 @@
       }
 
   let latestRows = [];
+  let userSupportLevels = {};
 
   async function fetchLTP() {
         const err = document.getElementById('error');
@@ -384,6 +387,10 @@
           const universe = json.universe;
           const meta = document.getElementById('meta');
           meta.textContent = `(${universe}, ${Object.keys(data).length} symbols)`;
+          
+          // Fetch user support levels
+          userSupportLevels = await fetchUserSupport();
+          
           const symbols = Object.keys(data).sort();
           const rows = symbols.map(s => {
             const d = data[s] || {};
@@ -458,7 +465,9 @@
         for (const r of rows){
           const tr = document.createElement('tr');
           // render supports/resistances arrays
-          const sup = (r.supports && r.supports.length) ? r.supports.join(', ') : '';
+          let sup = (r.supports && r.supports.length) ? r.supports.join(', ') : '';
+          const userSup = userSupportLevels[r.symbol];
+          if (userSup != null) sup = sup ? sup + ', ' + userSup : userSup;
           const resArr = (r.resistances && r.resistances.length) ? r.resistances.join(', ') : '';
           tr.innerHTML = rowHtml(r).replace('</td>\n          <td>' + fmtNum(r.last_close) + '</td>', '</td>\n          <td>' + fmtNum(r.last_close) + '</td>\n          <td>' + sup + '</td>\n          <td>' + resArr + '</td>');
           tbody.appendChild(tr);
@@ -558,6 +567,51 @@
       attachSortingFor('ltp-table-filtered', sortStateFiltered, renderFilteredTable);
       function manualRefresh(){ fetchLTP(); }
       function downloadCSV(){ window.location = '/export/ltp.csv'; }
+      async function saveUserSupport(symbol, value){
+        try {
+          await fetch('/api/user-support', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ symbol, support_price: value ? parseFloat(value) : null })
+          });
+        } catch(e) {
+          console.error('Failed to save user support:', e);
+        }
+      }
+      
+      async function fetchUserSupport(){
+        try {
+          const res = await fetch('/api/user-support');
+          const data = await res.json();
+          return data || {};
+        } catch(e) {
+          console.error('Failed to fetch user support:', e);
+          return {};
+        }
+      }
+      
+      async function saveMajorSupport(symbol, value){
+        try {
+          await fetch('/api/major-support', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ symbol, major_support: value ? parseFloat(value) : null })
+          });
+        } catch(e) {
+          console.error('Failed to save major support:', e);
+        }
+      }
+      
+      async function fetchMajorSupport(){
+        try {
+          const res = await fetch('/api/major-support');
+          const data = await res.json();
+          return data || {};
+        } catch(e) {
+          console.error('Failed to fetch major support:', e);
+          return {};
+        }
+      }
       // Tabs logic
       // Tab elements
       const tabMain = document.getElementById('tab-main');
@@ -644,6 +698,10 @@
   }
 
   function renderCKTables(){
+    renderCKTablesAsync();
+  }
+  
+  async function renderCKTablesAsync(){
     // Momentum table: Filter for momentum stocks (rank_gm > 0, bullish signals)
     const momentumRows = latestCKRows.filter(r => {
       // Momentum: positive rank, RSI > 40, bullish signal
@@ -668,9 +726,34 @@
     applySort(reversalsRows, sortStateCKReversals);
     const tbodyReversals = document.querySelector('#ck-table-reversals tbody');
     tbodyReversals.innerHTML = '';
+    
+    // Fetch user support and major support levels from DB
+    const userSupportMap = await fetchUserSupport();
+    const majorSupportMap = await fetchMajorSupport();
+    
     for (const r of reversalsRows){
       const tr = document.createElement('tr');
-      tr.innerHTML = renderCKRowHtml(r);
+      const userSup = userSupportMap[r.symbol] != null ? userSupportMap[r.symbol] : '';
+      const majorSup = majorSupportMap[r.symbol] != null ? majorSupportMap[r.symbol] : '';
+      const buyDisabled = (typeof r.last_price === 'number') ? '' : 'disabled';
+      
+      // Calculate color for last price based on % above user support
+      let lastPriceColor = '';
+      if (userSup && typeof r.last_price === 'number'){
+        const pctAboveSupport = ((r.last_price - userSup) / userSup) * 100;
+        if (pctAboveSupport <= 10){
+          if (pctAboveSupport < 2){
+            lastPriceColor = 'style="background-color: #90EE90; color: black;"'; // Green
+          } else if (pctAboveSupport <= 5){
+            lastPriceColor = 'style="background-color: #FFFF99; color: black;"'; // Yellow
+          } else {
+            lastPriceColor = 'style="background-color: #FF6B6B; color: white;"'; // Red
+          }
+        }
+        // If > 10%, don't apply any color (lastPriceColor remains empty string)
+      }
+      
+      tr.innerHTML = `<td>${r.symbol}</td><td><span class="badge rank">${r.rank_gm != null ? r.rank_gm.toFixed(2) : ''}</span></td><td><input type="number" step="1" placeholder="Support" value="${userSup}" onchange="saveUserSupport('${r.symbol}', this.value)" style="width:80px;" /></td><td ${lastPriceColor}>${r.last_price!=null? r.last_price.toFixed(2): ''}</td><td>${r.rsi_15m!=null? r.rsi_15m.toFixed(2): ''}</td><td><input type="number" step="1" placeholder="Major Sup" value="${majorSup}" onchange="saveMajorSupport('${r.symbol}', this.value)" style="width:80px;" /></td><td>${r.local_30d_low!=null? r.local_30d_low.toFixed(2)+'%': ''}</td><td>${r.local_30d_high!=null? r.local_30d_high.toFixed(2)+'%': ''}</td><td>${r.trading_zone_pct!=null? (r.trading_zone_pct*100).toFixed(2)+'%': ''}</td><td>${r.signal||''}</td><td>${r.action||''}</td><td><button class="btn small" onclick="placeBuy('${r.symbol}', this)" ${buyDisabled}>Buy</button></td>`;
       tbodyReversals.appendChild(tr);
     }
 
@@ -750,7 +833,7 @@
       const tbodyM = document.querySelector('#ck-table-momentum tbody'); 
       const tbodyR = document.querySelector('#ck-table-reversals tbody'); 
       if (tbodyM) tbodyM.innerHTML = `<tr><td colspan="10" class="muted">${e.message}</td></tr>`;
-      if (tbodyR) tbodyR.innerHTML = `<tr><td colspan="10" class="muted">${e.message}</td></tr>`;
+      if (tbodyR) tbodyR.innerHTML = `<tr><td colspan="11" class="muted">${e.message}</td></tr>`;
     }
     // polling management: if CK view visible, ensure interval running
     try{ clearInterval(ckInterval); }catch(e){}
@@ -998,7 +1081,7 @@
           if (ltp !== null && targetPrice !== null) {
             const targetPct = ((targetPrice - ltp) / ltp * 100).toFixed(1);
             targetStr = `${targetPrice.toFixed(2)} (${targetPct}%)`;
-            // Color: green if close to target (< 2%), yellow if < 5%, else muted
+            // Color: green if close to target (< 2%), yellow if < 5%, else black
             if (parseFloat(targetPct) < 2) targetStyle = 'color: var(--success); font-weight: 600;';
             else if (parseFloat(targetPct) < 5) targetStyle = 'color: #b8860b; font-weight: 600;';
           }

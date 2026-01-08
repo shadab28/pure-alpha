@@ -275,9 +275,10 @@ def main():
         print('Universe not found:', universe_name)
         return
 
-    # compute date range if rows not requested
-    to_date = datetime.utcnow().date()
-    from_date = to_date - timedelta(days=args.days)
+    # Use today's date for fetching candles (same day)
+    today = datetime.utcnow().date()
+    to_date = datetime.combine(today, datetime.max.time())
+    from_date = datetime.combine(today, datetime.min.time())
 
     # Preflight: ensure table and unique index exist once to avoid duplicate index creation by workers
     try:
@@ -342,52 +343,67 @@ def main():
                 return f'Instrument token not found for {s}'
 
             print(f"Timeframes to fetch: {timeframe_labels}")
+            
+            # Special handling for NIFTY 50: download historical daily data (2+ years) + 15m today
+            if s == 'NIFTY 50':
+                today = datetime.utcnow().date()
+                
+                # 1. Download historical daily data (2+ years)
+                print(f"Fetching historical daily data for {s}")
+                try:
+                    hist_start = today - timedelta(days=730)  # ~2 years
+                    hist_end = today + timedelta(days=1)
+                    c = _call_historical(kite, instr, hist_start, hist_end, 'day')
+                    hist_candles = list(c) if c else []
+                    if hist_candles:
+                        upsert_rows(cur, hist_candles, s, '1d')
+                        print(f"Upserted {len(hist_candles)} historical daily candles for {s}")
+                except Exception as e:
+                    print(f"Warning: Failed to fetch historical daily data for {s}: {e}")
+                
+                # 2. Download 15m candles for today
+                print(f"Fetching 15m intraday data for {s} (today only)")
+                try:
+                    intraday_start = datetime.combine(today, datetime.min.time())
+                    intraday_end = datetime.combine(today, datetime.max.time())
+                    c = _call_historical(kite, instr, intraday_start, intraday_end, '15minute')
+                    intraday_candles = list(c) if c else []
+                    if intraday_candles:
+                        upsert_rows(cur, intraday_candles, s, '15m')
+                        print(f"Upserted {len(intraday_candles)} 15m candles for {s}")
+                except Exception as e:
+                    print(f"Warning: Failed to fetch 15m data for {s}: {e}")
+                
+                return f'Completed NIFTY 50: historical daily + 15m today'
+            
+            # Regular processing for other symbols: fetch 200 candles for today
             for label, kite_tf in zip(timeframe_labels, kite_timeframes):
-                # target rows
-                target = args.rows or args.days
-                # determine end and start times based on now if requested
-                now_dt = datetime.utcnow()
-                # For intraday (15m) align end_dt to the current 15-minute boundary.
-                if kite_tf == '15minute':
-                    minute = (now_dt.minute // 15) * 15
-                    end_dt = now_dt.replace(minute=minute, second=0, microsecond=0)
-                else:
-                    end_dt = now_dt
-                # Estimate how many days/minutes to step back per request to gather target quickly
+                target = 200
+                
+                today = datetime.utcnow().date()
                 if kite_tf == 'day':
-                    # assume 250 trading days ~ 1 year; request a window proportional to target
-                    est_days = max(1, int(target * 1.5))
-                    start_dt = now_dt - timedelta(days=est_days)
+                    # For daily candles, fetch a wider range to ensure we get 200 days
+                    start_dt = today - timedelta(days=300)
+                    end_dt = today + timedelta(days=1)
                 else:
-                    # intraday bars per day ~ (6.5*60)/15 = 26 for 15m; estimate days needed
-                    bars_per_day = int((6.5 * 60) / 15)
-                    est_days = max(1, int((target / bars_per_day) * 1.5) + 1)
-                    start_dt = now_dt - timedelta(days=est_days)
+                    # For 15m candles, use today's date range
+                    start_dt = datetime.combine(today, datetime.min.time())
+                    end_dt = datetime.combine(today, datetime.max.time())
 
-                all_candles = []
-                attempts = 0
-                while len(all_candles) < target and attempts < 4:
-                    try:
-                        c = _call_historical(kite, instr, start_dt, end_dt, kite_tf)
-                    except Exception as e:
-                        return f'Failed to fetch for {s} {label}: {e}'
-                    if c:
-                        all_candles = list(c)
-                    if len(all_candles) >= target:
-                        break
-                    # expand window and retry
-                    attempts += 1
-                    est_days = est_days * 2
-                    start_dt = now_dt - timedelta(days=est_days)
-                    time.sleep(0.1)
+                try:
+                    c = _call_historical(kite, instr, start_dt, end_dt, kite_tf)
+                    all_candles = list(c) if c else []
+                except Exception as e:
+                    return f'Failed to fetch for {s} {label}: {e}'
 
                 if not all_candles:
+                    print(f"No candles fetched for {s} {label}")
                     continue
 
+                # Get last 200 candles
                 final = all_candles[-target:]
                 upsert_rows(cur, final, s, label)
-                # return a brief success message
-        return f'Upserted {len(final)} rows for {s} ({",".join(timeframe_labels)})'
+        return f'Upserted 200 candles for {s} ({",".join(timeframe_labels)})'
 
     # Run ThreadPoolExecutor over symbols
     # Force worker threads to 4 regardless of CLI

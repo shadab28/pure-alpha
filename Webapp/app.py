@@ -276,6 +276,115 @@ def api_ck():
 		return jsonify({"error": str(e)}), 500
 
 
+@app.route('/api/user-support', methods=['GET', 'POST'])
+def api_user_support():
+	"""Save or fetch user support levels from database."""
+	from pgAdmin_database.db_connection import pg_cursor
+	
+	if request.method == 'POST':
+		try:
+			data = request.get_json()
+			symbol = data.get('symbol')
+			support_price = data.get('support_price')
+			
+			if not symbol:
+				return jsonify({"error": "Missing symbol"}), 400
+			
+			with pg_cursor() as (cur, conn):
+				# Create table if it doesn't exist
+				cur.execute("""
+					CREATE TABLE IF NOT EXISTS user_support_levels (
+						id SERIAL PRIMARY KEY,
+						symbol TEXT UNIQUE NOT NULL,
+						support_price NUMERIC,
+						updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+					)
+				""")
+				
+				# Upsert the support level
+				cur.execute("""
+					INSERT INTO user_support_levels (symbol, support_price)
+					VALUES (%s, %s)
+					ON CONFLICT (symbol) DO UPDATE
+					SET support_price = EXCLUDED.support_price, updated_at = CURRENT_TIMESTAMP
+				""", (symbol, support_price if support_price else None))
+				
+				conn.commit()
+			
+			access_logger.info("/api/user-support POST: symbol=%s, support_price=%s", symbol, support_price)
+			return jsonify({"success": True, "symbol": symbol, "support_price": support_price})
+		except Exception as e:
+			error_logger.exception("/api/user-support POST failed: %s", e)
+			return jsonify({"error": str(e)}), 500
+	
+	else:  # GET
+		try:
+			with pg_cursor() as (cur, conn):
+				cur.execute("SELECT symbol, support_price FROM user_support_levels")
+				rows = cur.fetchall()
+				result = {row[0]: row[1] for row in rows}
+			
+			return jsonify(result)
+		except Exception as e:
+			error_logger.exception("/api/user-support GET failed: %s", e)
+			return jsonify({})
+
+
+@app.post("/api/major-support")
+@app.get("/api/major-support")
+def api_major_support():
+	"""Save or fetch major support levels from database."""
+	from pgAdmin_database.db_connection import pg_cursor
+	
+	if request.method == 'POST':
+		try:
+			data = request.get_json()
+			symbol = data.get('symbol')
+			major_support = data.get('major_support')
+			
+			if not symbol:
+				return jsonify({"error": "Missing symbol"}), 400
+			
+			with pg_cursor() as (cur, conn):
+				# Create table if it doesn't exist
+				cur.execute("""
+					CREATE TABLE IF NOT EXISTS major_support_levels (
+						id SERIAL PRIMARY KEY,
+						symbol TEXT UNIQUE NOT NULL,
+						major_support NUMERIC,
+						updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+					)
+				""")
+				
+				# Upsert the major support level
+				cur.execute("""
+					INSERT INTO major_support_levels (symbol, major_support)
+					VALUES (%s, %s)
+					ON CONFLICT (symbol) DO UPDATE
+					SET major_support = EXCLUDED.major_support, updated_at = CURRENT_TIMESTAMP
+				""", (symbol, major_support if major_support else None))
+				
+				conn.commit()
+			
+			access_logger.info("/api/major-support POST: symbol=%s, major_support=%s", symbol, major_support)
+			return jsonify({"success": True, "symbol": symbol, "major_support": major_support})
+		except Exception as e:
+			error_logger.exception("/api/major-support POST failed: %s", e)
+			return jsonify({"error": str(e)}), 500
+	
+	else:  # GET
+		try:
+			with pg_cursor() as (cur, conn):
+				cur.execute("SELECT symbol, major_support FROM major_support_levels")
+				rows = cur.fetchall()
+				result = {row[0]: row[1] for row in rows}
+			
+			return jsonify(result)
+		except Exception as e:
+			error_logger.exception("/api/major-support GET failed: %s", e)
+			return jsonify({})
+
+
 @app.get("/api/orderbook")
 def api_orderbook():
 	"""Return the active/open broker order book directly from Kite."""
