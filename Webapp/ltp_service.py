@@ -81,6 +81,11 @@ _sr_cache: Dict[str, Dict[str, Any]] = {}
 _sr_last_ts: Optional[datetime] = None
 _sr_lock = threading.RLock()
 
+# VCP (Volatility Contraction Pattern) cache
+_vcp_cache: Dict[str, Dict[str, Any]] = {}
+_vcp_last_ts: Optional[datetime] = None
+_vcp_lock = threading.RLock()
+
 DAILY_REFRESH_SECONDS = 3600  # recompute daily MAs at most once per hour
 FIFTEEN_MIN_REFRESH_SECONDS = 60  # recompute 15m SMA200 at most once per minute
 
@@ -643,6 +648,190 @@ def _refresh_sr_if_needed(symbols: List[str]):
         pass
 
 
+def _detect_vcp(closes_arr: List[float], highs_arr: List[float], lows_arr: List[float], lookback: int = 20, min_contractions: int = 3) -> Dict[str, Any]:
+    """Detect Volatility Contraction Pattern (VCP) - deterministic, non-repainting.
+    
+    VCP Logic (Mark Minervini):
+    1. Stock shows a series of contracting price ranges (volatility decreases)
+    2. Each contraction phase is lower in range than the previous
+    3. After 3+ contractions, price breaks out with volume
+    4. Entry on breakout above the highest high of the contraction phase
+    
+    Args:
+        closes_arr: List of closing prices (oldest first, newest last)
+        highs_arr: List of high prices (oldest first, newest last)
+        lows_arr: List of low prices (oldest first, newest last)
+        lookback: Number of candles to analyze for VCP pattern
+        min_contractions: Minimum number of contractions required (default 3)
+    
+    Returns:
+        Dict with VCP analysis: {
+            'has_vcp': bool,
+            'stage': str (e.g., 'contraction_1', 'breakout_ready', 'broken_out'),
+            'num_contractions': int,
+            'contraction_ranges': List[float],
+            'consolidation_low': float,
+            'consolidation_high': float,
+            'breakout_level': float,
+            'current_price': float,
+            'distance_to_breakout': float (% above breakout level),
+            'volatility_trend': str ('decreasing' or 'increasing'),
+        }
+    """
+    result = {
+        'has_vcp': False,
+        'stage': 'No Pattern',
+        'num_contractions': 0,
+        'contraction_ranges': [],
+        'consolidation_low': None,
+        'consolidation_high': None,
+        'breakout_level': None,
+        'current_price': None,
+        'distance_to_breakout': None,
+        'volatility_trend': None,
+    }
+    
+    try:
+        # Need at least lookback candles
+        if not closes_arr or not highs_arr or not lows_arr:
+            return result
+        
+        data_len = min(len(closes_arr), len(highs_arr), len(lows_arr))
+        if data_len < lookback:
+            return result
+        
+        # Get the last lookback candles
+        recent_closes = closes_arr[-lookback:]
+        recent_highs = highs_arr[-lookback:]
+        recent_lows = lows_arr[-lookback:]
+        
+        current_price = recent_closes[-1]
+        
+        # Divide lookback into chunks to identify contractions
+        # Standard VCP: 3-4 contractions, each 10-15 candles, with decreasing range
+        chunk_size = max(4, lookback // (min_contractions + 1))  # ~5-7 candles per chunk
+        
+        contraction_ranges = []
+        for i in range(0, lookback - chunk_size, chunk_size):
+            chunk_highs = recent_highs[i:i+chunk_size]
+            chunk_lows = recent_lows[i:i+chunk_size]
+            if chunk_highs and chunk_lows:
+                high = max(chunk_highs)
+                low = min(chunk_lows)
+                rng = high - low
+                contraction_ranges.append(rng)
+        
+        # Check if ranges are contracting (each smaller than previous)
+        num_contractions = 0
+        if len(contraction_ranges) >= min_contractions:
+            for j in range(1, len(contraction_ranges)):
+                if contraction_ranges[j] < contraction_ranges[j-1]:
+                    num_contractions += 1
+                else:
+                    break  # Stop counting once contraction breaks
+        
+        if num_contractions >= (min_contractions - 1):  # At least 2-3 consecutive contractions
+            result['has_vcp'] = True
+            result['num_contractions'] = num_contractions
+            result['contraction_ranges'] = [round(r, 2) for r in contraction_ranges]
+            
+            # Consolidation level: min/max of the most recent chunk (tightest contraction)
+            if contraction_ranges:
+                last_chunk_start = len(recent_highs) - chunk_size
+                if last_chunk_start < 0:
+                    last_chunk_start = 0
+                
+                consolidation_highs = recent_highs[last_chunk_start:]
+                consolidation_lows = recent_lows[last_chunk_start:]
+                
+                result['consolidation_low'] = round(min(consolidation_lows), 2)
+                result['consolidation_high'] = round(max(consolidation_highs), 2)
+                result['breakout_level'] = result['consolidation_high']
+                
+                # Determine stage based on current price vs breakout level
+                if current_price > result['breakout_level'] * 1.001:  # Above breakout + 0.1% buffer
+                    result['stage'] = 'Broken Out'
+                    distance_pct = ((current_price - result['breakout_level']) / result['breakout_level']) * 100
+                    result['distance_to_breakout'] = round(distance_pct, 2)
+                elif current_price >= result['breakout_level'] * 0.99:  # Within 1% of breakout
+                    result['stage'] = 'Breakout Ready / At Level'
+                    result['distance_to_breakout'] = 0.0
+                else:  # Below breakout
+                    result['stage'] = 'Consolidating'
+                    distance_pct = ((result['breakout_level'] - current_price) / current_price) * 100
+                    result['distance_to_breakout'] = -round(distance_pct, 2)  # Negative = below
+            
+            # Volatility trend
+            if len(contraction_ranges) >= 2:
+                if contraction_ranges[-1] < contraction_ranges[-2]:
+                    result['volatility_trend'] = 'Decreasing'
+                else:
+                    result['volatility_trend'] = 'Increasing'
+        
+        result['current_price'] = round(current_price, 2)
+    
+    except Exception:
+        pass
+    
+    return result
+
+
+def _refresh_vcp_if_needed(symbols: List[str]):
+    """Compute VCP patterns for given symbols using 15m data from ohlcv_data.
+    
+    Detects volatility contraction patterns and stores in _vcp_cache.
+    Refreshes at most once per 5 minutes.
+    """
+    if not test_connection() or pg_cursor is None:
+        return
+    
+    global _vcp_last_ts
+    now = datetime.now()
+    # Refresh at most once per 5 minutes
+    if _vcp_last_ts and (now - _vcp_last_ts) < timedelta(minutes=5):
+        return
+    
+    try:
+        with pg_cursor() as (cur, _):
+            # Fetch last 100 15m candles per symbol (enough for robust VCP detection)
+            cur.execute(
+                """
+                SELECT stockname, 
+                       array_agg(close ORDER BY candle_stock DESC) AS closes,
+                       array_agg(high ORDER BY candle_stock DESC) AS highs,
+                       array_agg(low ORDER BY candle_stock DESC) AS lows
+                FROM ohlcv_data
+                WHERE timeframe='15m' AND stockname = ANY(%s)
+                GROUP BY stockname
+                """,
+                (symbols,)
+            )
+            rows = cur.fetchall()
+        
+        with _vcp_lock:
+            _vcp_cache.clear()
+            for stockname, closes_raw, highs_raw, lows_raw in rows:
+                try:
+                    closes = [float(x) for x in (closes_raw or [])]
+                    highs = [float(x) for x in (highs_raw or [])]
+                    lows = [float(x) for x in (lows_raw or [])]
+                    
+                    # Reverse to chronological order (oldest first)
+                    closes = list(reversed(closes))
+                    highs = list(reversed(highs))
+                    lows = list(reversed(lows))
+                    
+                    # Detect VCP using last 80 candles (~13 hours of 15m data)
+                    vcp_result = _detect_vcp(closes, highs, lows, lookback=80, min_contractions=3)
+                    _vcp_cache[stockname] = vcp_result
+                except Exception:
+                    _vcp_cache[stockname] = {'has_vcp': False, 'stage': 'Error'}
+        
+        _vcp_last_ts = now
+    except Exception:
+        pass
+
+
 def fetch_ltp() -> Dict[str, Any]:
     """Fetch last price, last close, SMA200 (15m) and daily ratio (SMA50/SMA200).
 
@@ -668,6 +857,7 @@ def fetch_ltp() -> Dict[str, Any]:
     _refresh_daily_volratio_if_needed(symbols)
     _refresh_days_since_golden_cross_if_needed(symbols)
     _refresh_sr_if_needed(symbols)
+    _refresh_vcp_if_needed(symbols)
 
     try:
         quote_data = kite.quote(list(instruments.values()))
@@ -922,3 +1112,68 @@ def get_ck_data() -> Dict[str, Any]:
             out[sym]['ema100'] = None
             out[sym]['ema200'] = None
     return {"count": len(out), "data": out}
+
+
+def get_vcp_data() -> Dict[str, Any]:
+    """Return VCP (Volatility Contraction Pattern) breakout data.
+    
+    Returns symbols with active VCP patterns ranked by:
+    1. Status (Broken Out > Breakout Ready > Consolidating)
+    2. Distance to breakout (closest first)
+    3. Number of contractions
+    
+    Uses 15m candle data analyzed from ohlcv_data.
+    """
+    try:
+        ltp_resp = fetch_ltp()
+    except Exception as e:
+        return {"error": str(e)}
+    
+    data = ltp_resp.get('data', {})
+    
+    with _vcp_lock:
+        vcp_snapshot = dict(_vcp_cache)
+    
+    out = {}
+    for sym in data.keys():
+        vcp_info = vcp_snapshot.get(sym, {})
+        last_price = data[sym].get('last_price')
+        
+        # Only include symbols with active VCP patterns
+        if vcp_info.get('has_vcp'):
+            out[sym] = {
+                'last_price': last_price,
+                'stage': vcp_info.get('stage'),
+                'num_contractions': vcp_info.get('num_contractions'),
+                'consolidation_low': vcp_info.get('consolidation_low'),
+                'consolidation_high': vcp_info.get('consolidation_high'),
+                'breakout_level': vcp_info.get('breakout_level'),
+                'current_price': vcp_info.get('current_price'),
+                'distance_to_breakout': vcp_info.get('distance_to_breakout'),
+                'volatility_trend': vcp_info.get('volatility_trend'),
+                'contraction_ranges': vcp_info.get('contraction_ranges'),
+                # Include CK signal for context
+                'ck_signal': data[sym].get('signal'),
+                'ck_action': data[sym].get('action'),
+            }
+    
+    # Sort by stage priority and distance to breakout
+    stage_priority = {'Broken Out': 0, 'Breakout Ready / At Level': 1, 'Consolidating': 2}
+    
+    def sort_key(item):
+        sym, vcp_data = item
+        stage = vcp_data.get('stage', 'Consolidating')
+        priority = stage_priority.get(stage, 99)
+        distance = vcp_data.get('distance_to_breakout') or 0
+        # Closer to breakout (lower absolute distance) ranks higher
+        return (priority, abs(distance))
+    
+    sorted_symbols = sorted(out.items(), key=sort_key)
+    sorted_data = {sym: vcp_data for sym, vcp_data in sorted_symbols}
+    
+    return {
+        "count": len(sorted_data),
+        "last_updated": _vcp_last_ts.isoformat() if _vcp_last_ts else None,
+        "data": sorted_data
+    }
+

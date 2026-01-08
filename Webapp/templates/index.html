@@ -62,6 +62,7 @@
   <button id="tab-main" class="btn secondary">All</button>
   <button id="tab-filtered" class="btn secondary">Filtered</button>
     <button id="tab-ck" class="btn secondary">CK</button>
+  <button id="tab-vcp" class="btn secondary">VCP</button>
   <button id="tab-orders" class="btn secondary">Orders</button>
   <button id="tab-active" class="btn secondary">Active Orderbook</button>
     </div>
@@ -173,6 +174,36 @@
           </div>
         </div>
       </div>
+
+    <!-- VCP view -->
+    <div id="view-vcp" class="card" style="display:none; margin-top:14px;">
+      <div class="card-header" style="display:flex;align-items:center;justify-content:space-between;">
+        <span>VCP Breakout Patterns (15m Data)</span>
+        <div style="display:flex; gap:10px; align-items:center; font-size:12px;">
+          <span class="muted">Deterministic, Non-Repainting</span>
+        </div>
+      </div>
+      <div class="card-body">
+        <table id="vcp-table">
+          <thead>
+            <tr>
+              <th data-key="symbol">Symbol</th>
+              <th data-key="stage">Stage</th>
+              <th data-key="last_price">Current Price</th>
+              <th data-key="breakout_level">Breakout Level</th>
+              <th data-key="distance">Distance to Breakout (%)</th>
+              <th data-key="consolidation_low">Consolidation Low</th>
+              <th data-key="consolidation_high">Consolidation High</th>
+              <th data-key="num_contractions">Contractions</th>
+              <th data-key="volatility_trend">Volatility Trend</th>
+              <th data-key="signal">CK Signal</th>
+              <th data-key="action">CK Action</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
 
     <!-- Filtered view -->
     <div id="view-filtered" class="card" style="display:none; margin-top:14px;">
@@ -619,15 +650,16 @@
       const tabOrders = document.getElementById('tab-orders');
       const tabActive = document.getElementById('tab-active');
       const tabCK = document.getElementById('tab-ck');
+      const tabVCP = document.getElementById('tab-vcp');
 
       // Generic helper: show one view and highlight its tab with .active
       function setSelectedTab(tabEl, viewId){
         // hide all views
-        ['view-main','view-filtered','view-orders','view-active','view-ck'].forEach(id=>{
+        ['view-main','view-filtered','view-orders','view-active','view-ck','view-vcp'].forEach(id=>{
           const v = document.getElementById(id); if (v) v.style.display = 'none';
         });
         // normalize classes: set all tabs to exactly 'btn secondary' (remove active)
-        [tabMain, tabFiltered, tabOrders, tabActive, tabCK].forEach(t=>{
+        [tabMain, tabFiltered, tabOrders, tabActive, tabCK, tabVCP].forEach(t=>{
           if (!t) return;
           t.classList.remove('active');
           t.classList.remove('secondary');
@@ -648,6 +680,7 @@
       tabOrders.addEventListener('click', ()=> { setSelectedTab(tabOrders, 'view-orders'); fetchOrders(); });
       if (tabActive) tabActive.addEventListener('click', ()=> { setSelectedTab(tabActive, 'view-active'); fetchActiveOrderbook(); });
   if (tabCK) tabCK.addEventListener('click', ()=> { setSelectedTab(tabCK, 'view-ck'); fetchCK(); });
+  if (tabVCP) tabVCP.addEventListener('click', ()=> { setSelectedTab(tabVCP, 'view-vcp'); fetchVCP(); });
 
   // Default to All (main) tab on load
   setSelectedTab(tabMain, 'view-main');
@@ -845,6 +878,97 @@
   attachSortingFor('ck-table-reversals', sortStateCKReversals, renderCKTables);
   // attach sorting for averages table
   attachSortingFor('ck-table-averages', sortStateCKAverages, renderCKTables);
+
+  // VCP Tab Logic
+  let vcpInterval = null;
+  let latestVCPRows = [];
+  let sortStateVCP = { key: 'distance', dir: 'asc' };
+
+  function renderVCPRowHtml(r) {
+    // Stage coloring: 'Broken Out' (green), 'Breakout Ready / At Level' (yellow), 'Consolidating' (blue), 'No Pattern' (gray)
+    let stageBg = '#f0f0f0';
+    if (r.stage === 'Broken Out') stageBg = '#d4edda'; // light green
+    else if (r.stage === 'Breakout Ready / At Level') stageBg = '#fff3cd'; // light yellow
+    else if (r.stage === 'Consolidating') stageBg = '#d1ecf1'; // light blue
+    
+    // Distance coloring: negative (red, below breakout), positive (green, above)
+    let distanceBg = 'transparent';
+    if (r.distance != null) {
+      distanceBg = r.distance < 0 ? '#ffe6e6' : '#e6ffe6';
+    }
+    
+    // Volatility trend icon
+    let volTrendIcon = r.volatility_trend === 'Decreasing' ? '↓' : '↑';
+    
+    return `<td>${r.symbol}</td>
+            <td style="background-color: ${stageBg}; padding: 8px;">${r.stage || ''}</td>
+            <td>${r.last_price != null ? r.last_price.toFixed(2) : ''}</td>
+            <td>${r.breakout_level != null ? r.breakout_level.toFixed(2) : ''}</td>
+            <td style="background-color: ${distanceBg}; padding: 8px;">${r.distance != null ? r.distance.toFixed(2) + '%' : ''}</td>
+            <td>${r.consolidation_low != null ? r.consolidation_low.toFixed(2) : ''}</td>
+            <td>${r.consolidation_high != null ? r.consolidation_high.toFixed(2) : ''}</td>
+            <td>${r.num_contractions || ''}</td>
+            <td>${volTrendIcon} ${r.volatility_trend || ''}</td>
+            <td>${r.signal || ''}</td>
+            <td>${r.action || ''}</td>`;
+  }
+
+  function renderVCPTable() {
+    applySort(latestVCPRows, sortStateVCP);
+    const tbody = document.querySelector('#vcp-table tbody');
+    if (!tbody) return;
+    tbody.innerHTML = '';
+    if (latestVCPRows.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="11" class="muted">No VCP patterns detected</td></tr>';
+      return;
+    }
+    for (const r of latestVCPRows) {
+      const tr = document.createElement('tr');
+      tr.innerHTML = renderVCPRowHtml(r);
+      tbody.appendChild(tr);
+    }
+  }
+
+  async function fetchVCP() {
+    try {
+      const res = await fetch('/api/vcp');
+      const j = await res.json();
+      if (!res.ok) throw new Error(j.error || 'Failed to fetch VCP');
+      
+      const data = j.data || {};
+      const symbols = Object.keys(data).sort();
+      latestVCPRows = symbols.map(symbol => {
+        const item = data[symbol] || {};
+        return {
+          symbol: symbol,
+          stage: item.stage || 'No Pattern',
+          last_price: (typeof item.last_price === 'number') ? item.last_price : (item.last_price ? Number(item.last_price) : null),
+          breakout_level: (typeof item.breakout_level === 'number') ? item.breakout_level : (item.breakout_level ? Number(item.breakout_level) : null),
+          distance: (typeof item.distance_to_breakout === 'number') ? item.distance_to_breakout : (item.distance_to_breakout ? Number(item.distance_to_breakout) : null),
+          consolidation_low: (typeof item.consolidation_low === 'number') ? item.consolidation_low : (item.consolidation_low ? Number(item.consolidation_low) : null),
+          consolidation_high: (typeof item.consolidation_high === 'number') ? item.consolidation_high : (item.consolidation_high ? Number(item.consolidation_high) : null),
+          num_contractions: item.num_contractions || 0,
+          volatility_trend: item.volatility_trend || '',
+          signal: item.ck_signal || '',
+          action: item.ck_action || ''
+        };
+      });
+      
+      renderVCPTable();
+    } catch (e) {
+      const tbody = document.querySelector('#vcp-table tbody');
+      if (tbody) tbody.innerHTML = `<tr><td colspan="11" class="muted">${e.message}</td></tr>`;
+    }
+    
+    // polling management: if VCP view visible, ensure interval running
+    try { clearInterval(vcpInterval); } catch (e) {}
+    if (document.getElementById('view-vcp') && document.getElementById('view-vcp').style.display === 'block') {
+      vcpInterval = setInterval(fetchVCP, 10000);
+    }
+  }
+
+  // Attach sorting to VCP table
+  attachSortingFor('vcp-table', sortStateVCP, renderVCPTable);
 
   // Filters handlers
       document.getElementById('apply-filters').addEventListener('click', ()=> renderFilteredTable());

@@ -276,6 +276,33 @@ def api_ck():
 		return jsonify({"error": str(e)}), 500
 
 
+@app.route('/api/vcp')
+def api_vcp():
+	"""Return VCP (Volatility Contraction Pattern) breakout analysis.
+	
+	VCP is a technical pattern showing contracting volatility followed by breakout.
+	Uses 15m candlestick data to detect patterns (deterministic, non-repainting).
+	
+	Response includes:
+	- stage: Broken Out, Breakout Ready / At Level, or Consolidating
+	- consolidation_low/high: Price range during contraction
+	- breakout_level: Price level to watch for breakout
+	- distance_to_breakout: % distance from current price to breakout level
+	- num_contractions: Number of detected volatility contractions
+	- volatility_trend: Decreasing or Increasing
+	"""
+	try:
+		access_logger.info("GET /api/vcp from %s", request.remote_addr)
+		from ltp_service import get_vcp_data  # type: ignore
+		res = get_vcp_data()
+		if 'error' in res:
+			return jsonify({"error": res.get('error')}), 500
+		return jsonify(res)
+	except Exception as e:
+		error_logger.exception("/api/vcp failed: %s", e)
+		return jsonify({"error": str(e)}), 500
+
+
 @app.route('/api/user-support', methods=['GET', 'POST'])
 def api_user_support():
 	"""Save or fetch user support levels from database."""
