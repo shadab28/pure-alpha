@@ -376,34 +376,41 @@ def main():
                 
                 return f'Completed NIFTY 50: historical daily + 15m today'
             
-            # Regular processing for other symbols: fetch 200 candles for today
+            # Enhanced processing for ALL stocks: fetch 15m candles + 200 daily candles
+            # This enables VCP analysis across entire portfolio
             for label, kite_tf in zip(timeframe_labels, kite_timeframes):
-                target = 200
-                
                 today = datetime.utcnow().date()
-                if kite_tf == 'day':
-                    # For daily candles, fetch a wider range to ensure we get 200 days
-                    start_dt = today - timedelta(days=300)
-                    end_dt = today + timedelta(days=1)
-                else:
-                    # For 15m candles, use today's date range
-                    start_dt = datetime.combine(today, datetime.min.time())
-                    end_dt = datetime.combine(today, datetime.max.time())
-
-                try:
-                    c = _call_historical(kite, instr, start_dt, end_dt, kite_tf)
-                    all_candles = list(c) if c else []
-                except Exception as e:
-                    return f'Failed to fetch for {s} {label}: {e}'
-
-                if not all_candles:
-                    print(f"No candles fetched for {s} {label}")
-                    continue
-
-                # Get last 200 candles
-                final = all_candles[-target:]
-                upsert_rows(cur, final, s, label)
-        return f'Upserted 200 candles for {s} ({",".join(timeframe_labels)})'
+                
+                # Always fetch 15m data for intraday VCP analysis (enabled for all stocks as of Jan 9)
+                if kite_tf == '15minute' or label == '15m':
+                    print(f"Fetching 15m intraday data for {s}")
+                    try:
+                        intraday_start = datetime.combine(today, datetime.min.time())
+                        intraday_end = datetime.combine(today, datetime.max.time())
+                        c = _call_historical(kite, instr, intraday_start, intraday_end, '15minute')
+                        intraday_candles = list(c) if c else []
+                        if intraday_candles:
+                            upsert_rows(cur, intraday_candles, s, '15m')
+                            print(f"Upserted {len(intraday_candles)} 15m candles for {s}")
+                    except Exception as e:
+                        print(f"Warning: Failed to fetch 15m data for {s}: {e}")
+                
+                # Fetch daily candles: 200 recent candles
+                elif kite_tf == 'day' or label == '1d':
+                    print(f"Fetching daily candles for {s}")
+                    try:
+                        start_dt = today - timedelta(days=300)
+                        end_dt = today + timedelta(days=1)
+                        c = _call_historical(kite, instr, start_dt, end_dt, 'day')
+                        daily_candles = list(c) if c else []
+                        if daily_candles:
+                            final = daily_candles[-200:]  # Last 200 candles
+                            upsert_rows(cur, final, s, '1d')
+                            print(f"Upserted {len(final)} daily candles for {s}")
+                    except Exception as e:
+                        print(f"Warning: Failed to fetch daily data for {s}: {e}")
+        
+        return f'Completed {s}: 15m intraday + daily candles'
 
     # Run ThreadPoolExecutor over symbols
     # Force worker threads to 4 regardless of CLI
