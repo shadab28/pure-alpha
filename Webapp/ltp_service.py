@@ -1115,12 +1115,13 @@ def get_ck_data() -> Dict[str, Any]:
 
 
 def get_vcp_data() -> Dict[str, Any]:
-    """Return VCP (Volatility Contraction Pattern) breakout data.
+    """Return VCP (Volatility Contraction Pattern) breakout data for all stocks.
     
-    Returns symbols with active VCP patterns ranked by:
-    1. Status (Broken Out > Breakout Ready > Consolidating)
-    2. Distance to breakout (closest first)
-    3. Number of contractions
+    Returns all symbols with their VCP analysis (active patterns first), ranked by:
+    1. Active pattern status (has_vcp: True first)
+    2. Status (Broken Out > Breakout Ready > Consolidating > No Pattern)
+    3. Distance to breakout (closest first)
+    4. Number of contractions
     
     Uses 15m candle data analyzed from ohlcv_data.
     """
@@ -1139,34 +1140,35 @@ def get_vcp_data() -> Dict[str, Any]:
         vcp_info = vcp_snapshot.get(sym, {})
         last_price = data[sym].get('last_price')
         
-        # Only include symbols with active VCP patterns
-        if vcp_info.get('has_vcp'):
-            out[sym] = {
-                'last_price': last_price,
-                'stage': vcp_info.get('stage'),
-                'num_contractions': vcp_info.get('num_contractions'),
-                'consolidation_low': vcp_info.get('consolidation_low'),
-                'consolidation_high': vcp_info.get('consolidation_high'),
-                'breakout_level': vcp_info.get('breakout_level'),
-                'current_price': vcp_info.get('current_price'),
-                'distance_to_breakout': vcp_info.get('distance_to_breakout'),
-                'volatility_trend': vcp_info.get('volatility_trend'),
-                'contraction_ranges': vcp_info.get('contraction_ranges'),
-                # Include CK signal for context
-                'ck_signal': data[sym].get('signal'),
-                'ck_action': data[sym].get('action'),
-            }
+        # Include all symbols with their VCP analysis
+        out[sym] = {
+            'last_price': last_price,
+            'stage': vcp_info.get('stage', 'No Pattern'),
+            'has_vcp': vcp_info.get('has_vcp', False),
+            'num_contractions': vcp_info.get('num_contractions', 0),
+            'consolidation_low': vcp_info.get('consolidation_low'),
+            'consolidation_high': vcp_info.get('consolidation_high'),
+            'breakout_level': vcp_info.get('breakout_level'),
+            'current_price': vcp_info.get('current_price'),
+            'distance_to_breakout': vcp_info.get('distance_to_breakout'),
+            'volatility_trend': vcp_info.get('volatility_trend', ''),
+            'contraction_ranges': vcp_info.get('contraction_ranges', []),
+            # Include CK signal for context
+            'ck_signal': data[sym].get('signal'),
+            'ck_action': data[sym].get('action'),
+        }
     
-    # Sort by stage priority and distance to breakout
-    stage_priority = {'Broken Out': 0, 'Breakout Ready / At Level': 1, 'Consolidating': 2}
+    # Sort by active VCP patterns first, then by stage priority and distance to breakout
+    stage_priority = {'Broken Out': 0, 'Breakout Ready / At Level': 1, 'Consolidating': 2, 'No Pattern': 3}
     
     def sort_key(item):
         sym, vcp_data = item
-        stage = vcp_data.get('stage', 'Consolidating')
+        has_vcp = vcp_data.get('has_vcp', False)
+        stage = vcp_data.get('stage', 'No Pattern')
         priority = stage_priority.get(stage, 99)
         distance = vcp_data.get('distance_to_breakout') or 0
-        # Closer to breakout (lower absolute distance) ranks higher
-        return (priority, abs(distance))
+        # Active VCP patterns first (has_vcp=True), then by stage, then by distance
+        return (not has_vcp, priority, abs(distance))
     
     sorted_symbols = sorted(out.items(), key=sort_key)
     sorted_data = {sym: vcp_data for sym, vcp_data in sorted_symbols}
