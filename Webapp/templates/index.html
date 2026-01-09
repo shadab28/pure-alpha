@@ -195,9 +195,11 @@
               <th data-key="consolidation_low">Consolidation Low</th>
               <th data-key="consolidation_high">Consolidation High</th>
               <th data-key="num_contractions">Contractions</th>
+              <th data-key="contraction_ranges">Pattern Detail (Range Contractions)</th>
               <th data-key="volatility_trend">Volatility Trend</th>
               <th data-key="signal">CK Signal</th>
               <th data-key="action">CK Action</th>
+              <th>Action</th>
             </tr>
           </thead>
           <tbody></tbody>
@@ -900,6 +902,17 @@
     // Volatility trend icon
     let volTrendIcon = r.volatility_trend === 'Decreasing' ? '↓' : '↑';
     
+    // Format contraction ranges as detailed pattern string
+    let patternDetail = '';
+    if (r.contraction_ranges && r.contraction_ranges.length > 0) {
+      patternDetail = r.contraction_ranges.map(v => v.toFixed(2)).join(' → ');
+    } else {
+      patternDetail = 'N/A';
+    }
+    
+    // Trade button - disabled if no price or stage is "No Pattern"
+    const tradeDisabled = (typeof r.last_price === 'number' && r.stage !== 'No Pattern') ? '' : 'disabled';
+    
     return `<td>${r.symbol}</td>
             <td style="background-color: ${stageBg}; padding: 8px;">${r.stage || ''}</td>
             <td>${r.last_price != null ? r.last_price.toFixed(2) : ''}</td>
@@ -908,9 +921,11 @@
             <td>${r.consolidation_low != null ? r.consolidation_low.toFixed(2) : ''}</td>
             <td>${r.consolidation_high != null ? r.consolidation_high.toFixed(2) : ''}</td>
             <td>${r.num_contractions || ''}</td>
+            <td style="font-size: 11px; font-weight: bold;">${patternDetail}</td>
             <td>${volTrendIcon} ${r.volatility_trend || ''}</td>
             <td>${r.signal || ''}</td>
-            <td>${r.action || ''}</td>`;
+            <td>${r.action || ''}</td>
+            <td><button class="btn small" onclick="placeBuy('${r.symbol}', this)" ${tradeDisabled}>Trade</button></td>`;
   }
 
   function renderVCPTable() {
@@ -919,7 +934,7 @@
     if (!tbody) return;
     tbody.innerHTML = '';
     if (latestVCPRows.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="11" class="muted">No VCP patterns detected</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="13" class="muted">No VCP patterns detected</td></tr>';
       return;
     }
     for (const r of latestVCPRows) {
