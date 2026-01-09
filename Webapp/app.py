@@ -1524,78 +1524,78 @@ def api_orders():
 		return jsonify({"error": str(e)}), 500
 
 
-	@app.post('/api/order/cancel')
-	def api_cancel_order():
-		"""Cancel a broker order by order_id (JSON body: {"order_id": "..."})."""
+@app.post('/api/order/cancel')
+def api_cancel_order():
+	"""Cancel a broker order by order_id (JSON body: {"order_id": "..."})."""
+	try:
+		access_logger.info("POST /api/order/cancel from %s", request.remote_addr)
+		payload = request.get_json(silent=True) or {}
+		order_id = str(payload.get('order_id') or payload.get('orderId') or '').strip()
+		if not order_id:
+			return jsonify({"error": "order_id is required"}), 400
+		kite = get_kite()
+		# Try common cancel API names on the kite client
 		try:
-			access_logger.info("POST /api/order/cancel from %s", request.remote_addr)
-			payload = request.get_json(silent=True) or {}
-			order_id = str(payload.get('order_id') or payload.get('orderId') or '').strip()
-			if not order_id:
-				return jsonify({"error": "order_id is required"}), 400
-			kite = get_kite()
-			# Try common cancel API names on the kite client
-			try:
-				if hasattr(kite, 'cancel_order'):
-					# Many kite wrappers accept (order_id=...)
-					try:
-						res = kite.cancel_order(order_id=order_id)
-					except TypeError:
-						# fallback signature
-						res = kite.cancel_order(variety=getattr(kite, 'VARIETY_REGULAR', 'regular'), order_id=order_id)
-				else:
-					return jsonify({"error": "cancel_order not supported by kite client"}), 501
-			except Exception as ce:
-				error_logger.error("cancel_order failed for %s: %s", order_id, ce)
-				return jsonify({"error": str(ce)}), 500
-			# Remove from local stores if present
-			with _orders_lock:
-				_orders_store.pop(str(order_id), None)
+			if hasattr(kite, 'cancel_order'):
+				# Many kite wrappers accept (order_id=...)
+				try:
+					res = kite.cancel_order(order_id=order_id)
+				except TypeError:
+					# fallback signature
+					res = kite.cancel_order(variety=getattr(kite, 'VARIETY_REGULAR', 'regular'), order_id=order_id)
+			else:
+				return jsonify({"error": "cancel_order not supported by kite client"}), 501
+		except Exception as ce:
+			error_logger.error("cancel_order failed for %s: %s", order_id, ce)
+			return jsonify({"error": str(ce)}), 500
+		# Remove from local stores if present
+		with _orders_lock:
+			_orders_store.pop(str(order_id), None)
+		with _broker_orders_lock:
+			_broker_orders_cache.pop(str(order_id), None)
+		return jsonify({"status": "ok", "order_id": order_id, "result": res})
+	except Exception as e:
+		error_logger.exception("/api/order/cancel failed: %s", e)
+		return jsonify({"error": str(e)}), 500
+
+
+@app.post('/api/gtt/cancel')
+def api_cancel_gtt():
+	"""Cancel/delete a GTT by trigger id (JSON body: {"gtt_id": "..."})."""
+	try:
+		access_logger.info("POST /api/gtt/cancel from %s", request.remote_addr)
+		payload = request.get_json(silent=True) or {}
+		gtt_id = payload.get('gtt_id') or payload.get('trigger_id') or payload.get('id')
+		if gtt_id is None:
+			return jsonify({"error": "gtt_id is required"}), 400
+		kite = get_kite()
+		try:
+			# prefer delete_gtt if available
+			if hasattr(kite, 'delete_gtt'):
+				res = kite.delete_gtt(gtt_id)
+			elif hasattr(kite, 'cancel_gtt'):
+				res = kite.cancel_gtt(gtt_id)
+			else:
+				return jsonify({"error": "GTT delete not supported by kite client"}), 501
+		except Exception as ge:
+			error_logger.error("gtt cancel failed for %s: %s", gtt_id, ge)
+			return jsonify({"error": str(ge)}), 500
+		# Remove from cached GTTs if present
+		try:
 			with _broker_orders_lock:
-				_broker_orders_cache.pop(str(order_id), None)
-			return jsonify({"status": "ok", "order_id": order_id, "result": res})
-		except Exception as e:
-			error_logger.exception("/api/order/cancel failed: %s", e)
-			return jsonify({"error": str(e)}), 500
-
-
-	@app.post('/api/gtt/cancel')
-	def api_cancel_gtt():
-		"""Cancel/delete a GTT by trigger id (JSON body: {"gtt_id": "..."})."""
-		try:
-			access_logger.info("POST /api/gtt/cancel from %s", request.remote_addr)
-			payload = request.get_json(silent=True) or {}
-			gtt_id = payload.get('gtt_id') or payload.get('trigger_id') or payload.get('id')
-			if gtt_id is None:
-				return jsonify({"error": "gtt_id is required"}), 400
-			kite = get_kite()
-			try:
-				# prefer delete_gtt if available
-				if hasattr(kite, 'delete_gtt'):
-					res = kite.delete_gtt(gtt_id)
-				elif hasattr(kite, 'cancel_gtt'):
-					res = kite.cancel_gtt(gtt_id)
-				else:
-					return jsonify({"error": "GTT delete not supported by kite client"}), 501
-			except Exception as ge:
-				error_logger.error("gtt cancel failed for %s: %s", gtt_id, ge)
-				return jsonify({"error": str(ge)}), 500
-			# Remove from cached GTTs if present
-			try:
-				with _broker_orders_lock:
-					# purge any cached entries that reference this id
-					for k, arr in list(_gtt_cache.items()):
-						newarr = [g for g in arr if str(g.get('id') or g.get('trigger_id')) != str(gtt_id)]
-						if newarr:
-							_gtt_cache[k] = newarr
-						else:
-							_gtt_cache.pop(k, None)
-			except Exception:
-				pass
-			return jsonify({"status": "ok", "gtt_id": gtt_id, "result": res})
-		except Exception as e:
-			error_logger.exception("/api/gtt/cancel failed: %s", e)
-			return jsonify({"error": str(e)}), 500
+				# purge any cached entries that reference this id
+				for k, arr in list(_gtt_cache.items()):
+					newarr = [g for g in arr if str(g.get('id') or g.get('trigger_id')) != str(gtt_id)]
+					if newarr:
+						_gtt_cache[k] = newarr
+					else:
+						_gtt_cache.pop(k, None)
+		except Exception:
+			pass
+		return jsonify({"status": "ok", "gtt_id": gtt_id, "result": res})
+	except Exception as e:
+		error_logger.exception("/api/gtt/cancel failed: %s", e)
+		return jsonify({"error": str(e)}), 500
 
 
 if __name__ == "__main__":
