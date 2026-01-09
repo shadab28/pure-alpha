@@ -1526,11 +1526,12 @@ def api_orders():
 
 @app.post('/api/order/cancel')
 def api_cancel_order():
-	"""Cancel a broker order by order_id (JSON body: {"order_id": "..."})."""
+	"""Cancel a broker order by order_id (JSON body: {"order_id": "...", "symbol": "..."})."""
 	try:
 		access_logger.info("POST /api/order/cancel from %s", request.remote_addr)
 		payload = request.get_json(silent=True) or {}
 		order_id = str(payload.get('order_id') or payload.get('orderId') or '').strip()
+		symbol = str(payload.get('symbol') or '').strip()
 		if not order_id:
 			return jsonify({"error": "order_id is required"}), 400
 		kite = get_kite()
@@ -1553,7 +1554,41 @@ def api_cancel_order():
 			_orders_store.pop(str(order_id), None)
 		with _broker_orders_lock:
 			_broker_orders_cache.pop(str(order_id), None)
-		return jsonify({"status": "ok", "order_id": order_id, "result": res})
+		
+		# Auto-cancel linked GTT orders for the same symbol
+		cancelled_gtt_id = None
+		if symbol:
+			try:
+				with _broker_orders_lock:
+					gtt_list = _gtt_cache.get(symbol, [])
+					if gtt_list and len(gtt_list) > 0:
+						# Get the first GTT for this symbol (typically only one stop-loss per stock)
+						gtt_to_cancel = gtt_list[0]
+						gtt_id = gtt_to_cancel.get('id') or gtt_to_cancel.get('trigger_id')
+						if gtt_id:
+							try:
+								if hasattr(kite, 'delete_gtt'):
+									kite.delete_gtt(gtt_id)
+								elif hasattr(kite, 'cancel_gtt'):
+									kite.cancel_gtt(gtt_id)
+								cancelled_gtt_id = gtt_id
+								# Remove from cache
+								newarr = [g for g in gtt_list if str(g.get('id') or g.get('trigger_id')) != str(gtt_id)]
+								if newarr:
+									_gtt_cache[symbol] = newarr
+								else:
+									_gtt_cache.pop(symbol, None)
+								access_logger.info("Auto-cancelled GTT %s for symbol %s when order %s cancelled", gtt_id, symbol, order_id)
+							except Exception as gtt_err:
+								error_logger.warning("Failed to auto-cancel GTT %s for symbol %s: %s", gtt_id, symbol, gtt_err)
+			except Exception as e:
+				error_logger.warning("Error checking/cancelling linked GTT: %s", e)
+		
+		response = {"status": "ok", "order_id": order_id, "result": res}
+		if cancelled_gtt_id:
+			response["linked_gtt_cancelled"] = True
+			response["linked_gtt_id"] = cancelled_gtt_id
+		return jsonify(response)
 	except Exception as e:
 		error_logger.exception("/api/order/cancel failed: %s", e)
 		return jsonify({"error": str(e)}), 500

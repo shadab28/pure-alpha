@@ -1149,7 +1149,7 @@
             <td>${o.status||''}</td>
             <td>${o.order_type||o.type||''}</td>
             <td>
-              ${o.order_id? `<button class="btn small" onclick="cancelOrder('${o.order_id}', this)">Cancel</button>` : ''}
+              ${o.order_id? `<button class="btn small" onclick="cancelOrder('${o.order_id}', '${sym}', this)">Cancel</button>` : ''}
             </td>
           `;
           tbody.appendChild(tr);
@@ -1277,22 +1277,25 @@
       setInterval(()=>{ if (document.getElementById('view-active').style.display==='block') fetchActiveOrderbook(); }, 5000);
 
       // Cancel order/GTT handlers
-      async function cancelOrder(orderId, btn){
+      async function cancelOrder(orderId, symbol, btn){
         try{
           if (!orderId) return;
           // Ensure orderId is a string and trim whitespace
           const cleanOrderId = String(orderId).trim();
           if (!cleanOrderId) return;
-          if (!confirm(`Cancel order ${cleanOrderId}?`)) return;
+          const cleanSymbol = (typeof symbol === 'string') ? String(symbol).trim() : '';
+          const confirmMsg = cleanSymbol ? `Cancel order ${cleanOrderId} for ${cleanSymbol}?` : `Cancel order ${cleanOrderId}?`;
+          if (!confirm(confirmMsg)) return;
           if (btn) { btn.disabled = true; btn.textContent = 'Cancelling…'; }
           const res = await fetch('/api/order/cancel', {
             method: 'POST', 
             headers: {'Content-Type':'application/json'}, 
-            body: JSON.stringify({order_id: cleanOrderId})
+            body: JSON.stringify({order_id: cleanOrderId, symbol: cleanSymbol})
           });
           const j = await res.json();
           if (!res.ok) throw new Error(j.error || `Cancel failed: ${res.status}`);
-          alert(`Cancelled order ${cleanOrderId}`);
+          const linkedGTTMsg = j.linked_gtt_cancelled ? ` (also cancelled linked GTT #${j.linked_gtt_id})` : '';
+          alert(`Cancelled order ${cleanOrderId}${linkedGTTMsg}`);
           // Refresh both orders and holdings
           fetchOrders();
           fetchActiveOrderbook();
