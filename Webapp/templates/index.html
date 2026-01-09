@@ -1009,12 +1009,22 @@
             body: JSON.stringify({ symbol, budget: 10000, market: false, offset_pct: 0.0005, tsl: true, sl_pct: 0.05 })
           });
           const json = await res.json();
-          if (!res.ok){ throw new Error(json.error || 'Order failed'); }
-          const gttMsg = json.gtt_id ? `\nGTT SL ID: ${json.gtt_id}` : '';
-          const pxMsg = json.limit_price ? `\nLimit: ₹${Number(json.limit_price).toFixed(2)}` : '';
-          alert(`Order Placed\nSymbol: ${json.symbol}\nQty: ${json.quantity}${pxMsg}\nOrder ID: ${json.order_id}${gttMsg}`);
+          
+          // Handle order placement responses (success and partial success)
+          if (res.ok || res.status === 202) {
+            const pxMsg = json.limit_price ? `\nLimit: ₹${Number(json.limit_price).toFixed(2)}` : '';
+            const gttMsg = json.gtt_id ? `\nGTT SL ID: ${json.gtt_id}` : '';
+            const gttStatusMsg = json.gtt_placed ? '\n✓ GTT Placed' : '\n⚠ GTT Failed (see details)';
+            const detailedMsg = json.gtt_error ? `\n\nGTT Error: ${json.gtt_error}` : '';
+            const confirmMsg = json.message || 'Order placement status unknown';
+            
+            alert(`${confirmMsg}\n━━━━━━━━━━━━\nSymbol: ${json.symbol}\nQty: ${json.quantity}${pxMsg}\nOrder ID: ${json.order_id}${gttMsg}${gttStatusMsg}${detailedMsg}`);
+          } else {
+            // Handle order rejection (margin error, market closed, etc.)
+            throw new Error(json.error || 'Order placement failed');
+          }
         } catch(e){
-          alert(`Order error: ${e.message || e}`);
+          alert(`❌ Order Error:\n${e.message || e}`);
         } finally {
           if (btn){ btn.disabled = false; btn.textContent = 'Buy'; }
         }

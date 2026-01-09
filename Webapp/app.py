@@ -1198,9 +1198,26 @@ def api_place_buy():
 			order_kwargs.update(order_type=kite.ORDER_TYPE_MARKET)
 		else:
 			order_kwargs.update(order_type=kite.ORDER_TYPE_LIMIT, price=limit_price)
-		order_id = kite.place_order(**order_kwargs)
+		
+		# Place the limit order with proper error handling
+		try:
+			order_id = kite.place_order(**order_kwargs)
+		except Exception as order_err:
+			error_str = str(order_err).lower()
+			# Check for specific error conditions
+			if 'margin' in error_str or 'insufficient' in error_str or 'required' in error_str:
+				order_logger.error("ORDER_MARGIN_ERROR symbol=%s qty=%s price=%s err=%s", symbol, qty, limit_price, order_err)
+				return jsonify({"error": f"Margin/Insufficient funds: {str(order_err)}"}), 400
+			elif 'market' in error_str or 'closed' in error_str or 'trading hours' in error_str:
+				order_logger.error("ORDER_MARKET_CLOSED symbol=%s qty=%s err=%s", symbol, qty, order_err)
+				return jsonify({"error": f"Market closed or trading hours issue: {str(order_err)}"}), 400
+			else:
+				order_logger.error("ORDER_PLACEMENT_FAILED symbol=%s qty=%s price=%s err=%s", symbol, qty, limit_price, order_err)
+				return jsonify({"error": f"Order placement failed: {str(order_err)}"}), 400
+		
+		# Only place GTT if order was successfully placed
 		gtt_id = None
-		if with_tsl:
+		if with_tsl and order_id:
 			try:
 				# Place bracket OCO: target +7.5%, stop -5%
 				gtt_id = _place_bracket_oco_gtt(kite, symbol, qty, ref_price=ltp, target_pct=0.075, sl_pct=sl_pct)
@@ -1242,7 +1259,13 @@ def api_place_buy():
 					pass
 			except Exception as ge:
 				order_logger.error("ORDER_GTT_FAIL symbol=%s qty=%s sl_pct=%.3f err=%s", symbol, qty, sl_pct, ge)
-				# Don't fail the buy if GTT fails; return both
+				# GTT placement failed but order succeeded; return partial success
+				gtt_error_msg = str(ge)
+				# Check for specific GTT errors
+				if 'margin' in gtt_error_msg.lower() or 'insufficient' in gtt_error_msg.lower():
+					gtt_error_msg = f"GTT Margin Error: {ge}"
+				elif 'market' in gtt_error_msg.lower() or 'closed' in gtt_error_msg.lower():
+					gtt_error_msg = f"GTT Market Closed: {ge}"
 				with _orders_lock:
 					_orders_store[str(order_id)] = {
 						"symbol": symbol,
@@ -1257,7 +1280,8 @@ def api_place_buy():
 					"symbol": symbol,
 					"limit_price": limit_price,
 					"quantity": qty,
-					"gtt_error": str(ge)
+					"gtt_error": gtt_error_msg,
+					"message": "Limit order placed successfully, but GTT placement failed"
 				}), 202
 		# Record order in store
 		with _orders_lock:
@@ -1275,13 +1299,13 @@ def api_place_buy():
 			"symbol": symbol,
 			"limit_price": limit_price,
 			"quantity": qty,
-			"gtt_id": gtt_id
+			"gtt_id": gtt_id,
+			"gtt_placed": bool(gtt_id),
+			"message": "Limit order and GTT placed successfully" if gtt_id else "Limit order placed successfully (GTT not requested)"
 		})
 	except Exception as e:
 		error_logger.exception("/api/order/buy failed: %s", e)
 		return jsonify({"error": str(e)}), 500
-
-
 @app.get("/api/orders")
 def api_orders():
 	"""Return orders placed via this app with live LTP, trailing stop, and PnL."""
