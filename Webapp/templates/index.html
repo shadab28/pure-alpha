@@ -1280,16 +1280,24 @@
       async function cancelOrder(orderId, btn){
         try{
           if (!orderId) return;
-          if (!confirm(`Cancel order ${orderId}?`)) return;
+          // Ensure orderId is a string and trim whitespace
+          const cleanOrderId = String(orderId).trim();
+          if (!cleanOrderId) return;
+          if (!confirm(`Cancel order ${cleanOrderId}?`)) return;
           if (btn) { btn.disabled = true; btn.textContent = 'Cancelling…'; }
           const res = await fetch('/api/order/cancel', {
-            method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({order_id: orderId})
+            method: 'POST', 
+            headers: {'Content-Type':'application/json'}, 
+            body: JSON.stringify({order_id: cleanOrderId})
           });
           const j = await res.json();
-          if (!res.ok) throw new Error(j.error || 'Cancel failed');
-          alert(`Cancelled order ${orderId}`);
+          if (!res.ok) throw new Error(j.error || `Cancel failed: ${res.status}`);
+          alert(`Cancelled order ${cleanOrderId}`);
+          // Refresh both orders and holdings
           fetchOrders();
+          fetchActiveOrderbook();
         }catch(e){
+          console.error('Order cancel error:', e);
           alert(`Cancel error: ${e.message||e}`);
         }finally{ if (btn){ btn.disabled = false; btn.textContent = 'Cancel'; } }
       }
@@ -1297,14 +1305,24 @@
       async function cancelGTT(gttId, symbol, btn){
         try{
           if (!gttId) return;
-          if (!confirm(`Cancel GTT ${gttId} for ${symbol || ''}?`)) return;
+          // Ensure gttId is a string and trim whitespace
+          const cleanGttId = String(gttId).trim();
+          if (!cleanGttId) return;
+          if (!confirm(`Cancel GTT ${cleanGttId} for ${symbol || ''}?`)) return;
           if (btn) { btn.disabled = true; btn.textContent = 'Cancelling…'; }
-          const res = await fetch('/api/gtt/cancel', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({gtt_id: gttId}) });
+          const res = await fetch('/api/gtt/cancel', { 
+            method: 'POST', 
+            headers: {'Content-Type':'application/json'}, 
+            body: JSON.stringify({gtt_id: cleanGttId}) 
+          });
           const j = await res.json();
-          if (!res.ok) throw new Error(j.error || 'GTT cancel failed');
-          alert(`Cancelled GTT ${gttId}`);
+          if (!res.ok) throw new Error(j.error || `GTT cancel failed: ${res.status}`);
+          alert(`Cancelled GTT ${cleanGttId} for ${symbol}`);
+          // Refresh both orders and holdings
           fetchOrders();
+          fetchActiveOrderbook();
         }catch(e){
+          console.error('GTT cancel error:', e);
           alert(`Cancel GTT error: ${e.message||e}`);
         }finally{ if (btn){ btn.disabled = false; btn.textContent = 'Cancel GTT'; } }
       }
