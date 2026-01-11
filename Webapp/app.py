@@ -303,6 +303,33 @@ def api_vcp():
 		return jsonify({"error": str(e)}), 500
 
 
+@app.route('/api/refresh/averages', methods=['POST'])
+def api_refresh_averages():
+	"""Manually trigger a refresh of all daily moving averages from database.
+	
+	This endpoint forces an immediate refresh of EMA5, EMA8, EMA10, EMA20, EMA50, 
+	EMA100, and EMA200 from the ohlcv_data table in PostgreSQL.
+	
+	Response includes:
+	- status: "success" or "error"
+	- symbols_requested: Number of symbols requested
+	- symbols_cached: Number of symbols with cached data
+	- symbols_with_data: Number of symbols with actual EMA values computed
+	- last_updated: ISO format timestamp
+	"""
+	try:
+		access_logger.info("POST /api/refresh/averages from %s", request.remote_addr)
+		from ltp_service import manual_refresh_all_averages  # type: ignore
+		res = manual_refresh_all_averages()
+		if 'error' in res:
+			error_logger.error("Average refresh failed: %s", res.get('error'))
+			return jsonify(res), 500
+		return jsonify(res)
+	except Exception as e:
+		error_logger.exception("/api/refresh/averages failed: %s", e)
+		return jsonify({"status": "error", "error": str(e)}), 500
+
+
 @app.route('/api/user-support', methods=['GET', 'POST'])
 def api_user_support():
 	"""Save or fetch user support levels from database."""
@@ -1053,10 +1080,12 @@ def _ensure_trailer_thread(kite):
 						gtt_type = st.get('gtt_type', 'single')  # default to single for backward compat
 						if hasattr(kite, 'modify_gtt') and st.get('gtt_id'):
 							if gtt_type == 'oco':
-								# OCO GTT: update both stop and target triggers
-								# Target stays at original % above current LTP
-								target_pct = st.get('target_pct', 0.075)
-								new_target = _round_to_tick(ltp * (1 + target_pct), st['tick'])
+								# OCO GTT: update stop trigger but keep target price fixed (don't change it)
+								new_target = st.get('initial_target')  # Use original target price
+								if not new_target:
+									# Fallback if initial_target not set (legacy state)
+									target_pct = st.get('target_pct', 0.075)
+									new_target = _round_to_tick(ltp * (1 + target_pct), st['tick'])
 								resp = kite.modify_gtt(
 									trigger_id=st['gtt_id'],
 									trigger_type=kite.GTT_TYPE_OCO,
@@ -1081,7 +1110,7 @@ def _ensure_trailer_thread(kite):
 										},
 									]
 								)
-								trail_logger.info("TRAIL_MODIFY_OCO symbol=%s gtt_id=%s stop=%.2f target=%.2f", sym, st.get('gtt_id'), new_trig, new_target)
+								trail_logger.info("TRAIL_MODIFY_OCO symbol=%s gtt_id=%s stop=%.2f target=%.2f (fixed)", sym, st.get('gtt_id'), new_trig, new_target)
 							else:
 								# Single-leg GTT
 								resp = kite.modify_gtt(
@@ -1134,6 +1163,8 @@ def _start_trailing(kite, symbol: str, qty: int, sl_pct: float, ltp: float, tick
 		state = _trail_state.get(str(gtt_id)) or {}
 		# Use provided initial_trigger (from existing GTT stop) or compute from LTP
 		trigger = initial_trigger if initial_trigger is not None else _round_to_tick(ltp * (1 - sl_pct), tick)
+		# Calculate initial target price (stays fixed, not recalculated on modifications)
+		initial_target = _round_to_tick(ltp * (1 + target_pct), tick) if gtt_type == 'oco' else None
 		state.update({
 			'symbol': symbol,  # Store symbol for quote lookups
 			'qty': qty,
@@ -1143,9 +1174,114 @@ def _start_trailing(kite, symbol: str, qty: int, sl_pct: float, ltp: float, tick
 			'trigger': trigger,
 			'gtt_type': gtt_type,
 			'target_pct': target_pct,
+			'initial_target': initial_target,  # Store fixed target price
 		})
 		_trail_state[str(gtt_id)] = state
 	_ensure_trailer_thread(kite)
+
+
+# Helper function to log trade entries to the database
+def _log_trade_entry(symbol, qty, entry_price, order_id, gtt_id):
+	"""Automatically log a trade entry when order is placed."""
+	from datetime import datetime
+	from pgAdmin_database.db_connection import pg_cursor
+	
+	try:
+		trade_id = f"ENTRY_{order_id}_{int(time.time())}"
+		timestamp = datetime.utcnow().isoformat()
+		
+		with pg_cursor() as (cur, conn):
+			# Create table if it doesn't exist
+			cur.execute("""
+				CREATE TABLE IF NOT EXISTS trade_journal (
+					id SERIAL PRIMARY KEY,
+					trade_id TEXT UNIQUE,
+					symbol TEXT NOT NULL,
+					entry_date TIMESTAMP,
+					entry_price NUMERIC,
+					entry_qty INTEGER,
+					exit_date TIMESTAMP,
+					exit_price NUMERIC,
+					pnl NUMERIC,
+					pnl_pct NUMERIC,
+					duration NUMERIC,
+					strategy TEXT,
+					status TEXT,
+					notes TEXT,
+					order_id TEXT,
+					gtt_id TEXT,
+					created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+					updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+				)
+			""")
+			
+			# Insert trade entry
+			cur.execute("""
+				INSERT INTO trade_journal (trade_id, symbol, entry_date, entry_price, entry_qty, status, order_id, gtt_id, notes)
+				VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+				ON CONFLICT (trade_id) DO UPDATE SET
+					updated_at = CURRENT_TIMESTAMP
+			""", (trade_id, symbol, timestamp, entry_price, qty, 'open', order_id, gtt_id, 'Auto-logged from app'))
+			
+			conn.commit()
+			order_logger.info("Trade journal entry created: trade_id=%s symbol=%s qty=%s price=%s", trade_id, symbol, qty, entry_price)
+	except Exception as e:
+		order_logger.error("Failed to log trade entry: %s", e)
+		raise
+
+
+def _log_trade_exit(order_id, symbol, exit_price, exit_qty, exit_type='completed'):
+	"""Automatically log a trade exit when order is completed or GTT triggered."""
+	from datetime import datetime
+	from pgAdmin_database.db_connection import pg_cursor
+	
+	try:
+		timestamp = datetime.utcnow().isoformat()
+		
+		with pg_cursor() as (cur, conn):
+			# Find the matching entry for this order
+			cur.execute("""
+				SELECT id, entry_price, entry_qty, entry_date FROM trade_journal 
+				WHERE order_id = %s AND status = 'open'
+				LIMIT 1
+			""", (str(order_id),))
+			
+			entry_record = cur.fetchone()
+			if not entry_record:
+				order_logger.warning("No open trade entry found for order_id=%s", order_id)
+				return
+			
+			entry_id, entry_price, entry_qty, entry_date = entry_record
+			
+			# Calculate PnL
+			pnl = (exit_price - entry_price) * exit_qty
+			pnl_pct = ((exit_price - entry_price) / entry_price * 100) if entry_price > 0 else 0
+			
+			# Calculate duration in hours
+			duration_hours = None
+			if entry_date:
+				from datetime import datetime
+				exit_dt = datetime.fromisoformat(timestamp)
+				entry_dt = datetime.fromisoformat(entry_date) if isinstance(entry_date, str) else entry_date
+				if isinstance(entry_dt, str):
+					entry_dt = datetime.fromisoformat(entry_dt)
+				duration_hours = (exit_dt - entry_dt).total_seconds() / 3600
+			
+			# Update trade journal entry with exit data
+			cur.execute("""
+				UPDATE trade_journal 
+				SET exit_date = %s, exit_price = %s, pnl = %s, pnl_pct = %s, 
+					duration = %s, status = %s, notes = %s, updated_at = CURRENT_TIMESTAMP
+				WHERE id = %s
+			""", (timestamp, exit_price, pnl, pnl_pct, duration_hours, 'closed', 
+				  f'Auto-logged exit ({exit_type})', entry_id))
+			
+			conn.commit()
+			order_logger.info("Trade exit logged: order_id=%s symbol=%s exit_price=%.2f pnl=%.2f pnl_pct=%.2f", 
+							 order_id, symbol, exit_price, pnl, pnl_pct)
+	except Exception as e:
+		order_logger.error("Failed to log trade exit: %s", e)
+		# Don't raise - exit logging should not block main flow
 
 
 @app.post("/api/order/buy")
@@ -1215,9 +1351,31 @@ def api_place_buy():
 				order_logger.error("ORDER_PLACEMENT_FAILED symbol=%s qty=%s price=%s err=%s", symbol, qty, limit_price, order_err)
 				return jsonify({"error": f"Order placement failed: {str(order_err)}"}), 400
 		
-		# Only place GTT if order was successfully placed
+		# Verify order was accepted (not rejected) before placing GTT
+		order_status = "PENDING"  # Default assumption
+		try:
+			# Check order status from broker
+			orders = kite.orders() or []
+			for o in orders:
+				if str(o.get('order_id')) == str(order_id):
+					order_status = (o.get('status') or '').upper()
+					break
+		except Exception as status_err:
+			order_logger.warning("Could not verify order status for %s: %s", order_id, status_err)
+		
+		# Only place GTT if order was accepted (not rejected)
 		gtt_id = None
-		if with_tsl and order_id:
+		if order_status == "REJECTED":
+			order_logger.error("ORDER_REJECTED symbol=%s order_id=%s status=%s", symbol, order_id, order_status)
+			return jsonify({
+				"status": "rejected",
+				"error": "Order was rejected by broker",
+				"order_id": order_id,
+				"symbol": symbol,
+				"reason": "The order was not accepted. This could be due to margin, market hours, or broker restrictions. No GTT was placed."
+			}), 400
+		
+		if with_tsl and order_id and order_status != "REJECTED":
 			try:
 				# Place bracket OCO: target +7.5%, stop -5%
 				gtt_id = _place_bracket_oco_gtt(kite, symbol, qty, ref_price=ltp, target_pct=0.075, sl_pct=sl_pct)
@@ -1293,6 +1451,14 @@ def api_place_buy():
 				"ts": int(time.time()),
 			}
 		order_logger.info("ORDER_OK symbol=%s qty=%s price=%s order_id=%s gtt_id=%s trailing=%s", symbol, qty, limit_price, order_id, gtt_id, with_tsl)
+		
+		# Automatically log to trade journal
+		try:
+			from datetime import datetime
+			_log_trade_entry(symbol, qty, limit_price or ltp, order_id, gtt_id)
+		except Exception as je:
+			order_logger.warning("Failed to log trade journal entry for %s: %s", symbol, je)
+		
 		return jsonify({
 			"status": "ok",
 			"order_id": order_id,
@@ -1655,6 +1821,542 @@ def api_cancel_gtt():
 	except Exception as e:
 		error_logger.exception("/api/gtt/cancel failed: %s", e)
 		return jsonify({"error": str(e)}), 500
+
+
+@app.post('/api/gtt/book')
+def api_book_gtt():
+	"""Book profit: modify GTT to set target at LTP (current price), keep stop same.
+	JSON body: {"gtt_id": "...", "symbol": "...", "qty": int, "stop_price": float, "target_price": float}
+	"""
+	try:
+		access_logger.info("POST /api/gtt/book from %s", request.remote_addr)
+		payload = request.get_json(silent=True) or {}
+		gtt_id = payload.get('gtt_id') or payload.get('trigger_id') or payload.get('id')
+		symbol = (payload.get('symbol') or '').strip().upper()
+		qty = int(payload.get('qty', 0))
+		stop_price = float(payload.get('stop_price', 0))
+		target_price = float(payload.get('target_price', 0))
+		
+		if not gtt_id or not symbol or qty <= 0 or stop_price <= 0 or target_price <= 0:
+			return jsonify({"error": "gtt_id, symbol, qty, stop_price, and target_price are required"}), 400
+		
+		kite = get_kite()
+		
+		# Fetch tick size for proper rounding
+		inst_csv = os.path.join(REPO_ROOT, os.getenv('INSTRUMENTS_CSV', os.path.join('Csvs','instruments.csv')))
+		ticks = _load_tick_sizes(inst_csv)
+		tick = ticks.get(symbol) or _fallback_tick_by_price(target_price)
+		
+		# Round prices to proper tick
+		stop_px = _round_to_tick(stop_price, tick)
+		
+		# target_price from frontend is LTP - we need to set target 0.3% above it
+		# Zerodha API requires trigger price to differ from LTP by at least 0.25%
+		ltp = _round_to_tick(target_price, tick)  # Keep original LTP for last_price param
+		buffer_amount = ltp * 0.003  # 0.3% buffer above LTP
+		target_px = _round_to_tick(ltp + buffer_amount, tick)
+		
+		if stop_px <= 0 or ltp <= 0:
+			return jsonify({"error": "Invalid stop or LTP price after rounding"}), 400
+		
+		try:
+			# Cancel the GTT order first
+			try:
+				kite.delete_gtt(trigger_id=gtt_id)
+				order_logger.info("BOOK_GTT cancelled GTT %s for %s", gtt_id, symbol)
+			except Exception as cancel_err:
+				order_logger.warning("Failed to cancel GTT %s: %s", gtt_id, cancel_err)
+				return jsonify({"error": f"Failed to cancel GTT: {str(cancel_err)}"}), 500
+			
+			# Place a limit sell order at LTP to get filled immediately
+			order_id = kite.place_order(
+				variety=kite.VARIETY_REGULAR,
+				exchange='NSE',
+				tradingsymbol=symbol,
+				transaction_type=kite.TRANSACTION_TYPE_SELL,
+				quantity=qty,
+				product=kite.PRODUCT_CNC,
+				order_type=kite.ORDER_TYPE_LIMIT,
+				price=ltp
+			)
+			order_logger.info("BOOK_GTT placed SELL order symbol=%s order_id=%s qty=%d price=%.2f (cancelled_gtt=%s)", 
+							  symbol, order_id, qty, ltp, gtt_id)
+		except Exception as ge:
+			order_logger.error("gtt book failed for %s: %s", gtt_id, ge)
+			return jsonify({"error": f"Book order failed: {str(ge)}"}), 500
+		
+		return jsonify({
+			"status": "ok",
+			"gtt_id": gtt_id,
+			"order_id": order_id,
+			"symbol": symbol,
+			"sell_price": ltp,
+			"quantity": qty,
+			"message": f"GTT cancelled, SELL order placed at {ltp:.2f}"
+		})
+	except Exception as e:
+		order_logger.exception("/api/gtt/book failed: %s", e)
+		return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/trade-journal', methods=['GET', 'POST', 'PUT'])
+def api_trade_journal():
+	"""Get, create, or update trade journal entries with order book data."""
+	from pgAdmin_database.db_connection import pg_cursor
+	
+	try:
+		if request.method == 'POST':
+			# Create a new trade journal entry
+			data = request.get_json()
+			trade_id = data.get('trade_id')
+			symbol = data.get('symbol')
+			timestamp = data.get('timestamp')
+			side = data.get('side')  # 'BUY' or 'SELL'
+			order_book_imbalance = data.get('order_book_imbalance')
+			intended_entry_price = data.get('intended_entry_price')
+			fill_price = data.get('fill_price')
+			slippage = data.get('slippage')
+			exit_price = data.get('exit_price')
+			pnl = data.get('pnl')
+			setup_description = data.get('setup_description')
+			
+			if not symbol or not timestamp or not side:
+				return jsonify({"error": "symbol, timestamp, and side are required"}), 400
+			
+			with pg_cursor() as (cur, conn):
+				# Create table if it doesn't exist
+				cur.execute("""
+					CREATE TABLE IF NOT EXISTS trade_journal (
+						id SERIAL PRIMARY KEY,
+						trade_id TEXT UNIQUE,
+						symbol TEXT NOT NULL,
+						timestamp TIMESTAMP NOT NULL,
+						side TEXT NOT NULL,
+						order_book_imbalance NUMERIC,
+						intended_entry_price NUMERIC,
+						fill_price NUMERIC,
+						slippage NUMERIC,
+						exit_price NUMERIC,
+						pnl NUMERIC,
+						setup_description TEXT,
+						created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+						updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+					)
+				""")
+				
+				# Insert or update the trade
+				if trade_id:
+					cur.execute("""
+						INSERT INTO trade_journal (trade_id, symbol, timestamp, side, order_book_imbalance, 
+													intended_entry_price, fill_price, slippage, exit_price, pnl, setup_description)
+						VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+						ON CONFLICT (trade_id) DO UPDATE SET
+							exit_price = EXCLUDED.exit_price,
+							pnl = EXCLUDED.pnl,
+							updated_at = CURRENT_TIMESTAMP
+					""", (trade_id, symbol, timestamp, side, order_book_imbalance, intended_entry_price, 
+						  fill_price, slippage, exit_price, pnl, setup_description))
+				else:
+					cur.execute("""
+						INSERT INTO trade_journal (symbol, timestamp, side, order_book_imbalance, 
+													intended_entry_price, fill_price, slippage, exit_price, pnl, setup_description)
+						VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+					""", (symbol, timestamp, side, order_book_imbalance, intended_entry_price, 
+						  fill_price, slippage, exit_price, pnl, setup_description))
+				
+				conn.commit()
+				cur.execute("SELECT id FROM trade_journal WHERE trade_id = %s OR (trade_id IS NULL AND symbol = %s AND timestamp = %s)", 
+						   (trade_id, symbol, timestamp))
+				result = cur.fetchone()
+				new_id = result[0] if result else None
+			
+			access_logger.info("/api/trade-journal POST: symbol=%s, side=%s", symbol, side)
+			return jsonify({"success": True, "id": new_id, "symbol": symbol, "side": side})
+		
+		elif request.method == 'PUT':
+			# Update an existing trade entry (for exit prices and PnL)
+			data = request.get_json()
+			trade_id = data.get('trade_id')
+			
+			if not trade_id:
+				return jsonify({"error": "trade_id is required for update"}), 400
+			
+			with pg_cursor() as (cur, conn):
+				cur.execute("""
+					UPDATE trade_journal 
+					SET exit_price = %s, pnl = %s, updated_at = CURRENT_TIMESTAMP
+					WHERE trade_id = %s
+				""", (data.get('exit_price'), data.get('pnl'), trade_id))
+				
+				conn.commit()
+			
+			access_logger.info("/api/trade-journal PUT: trade_id=%s, pnl=%s", trade_id, data.get('pnl'))
+			return jsonify({"success": True, "trade_id": trade_id})
+		
+		else:  # GET
+			# Fetch trade journal entries
+			symbol_filter = request.args.get('symbol')
+			days_back = int(request.args.get('days', 30))
+			
+			with pg_cursor() as (cur, conn):
+				if symbol_filter:
+					cur.execute("""
+						SELECT id, trade_id, symbol, timestamp, side, order_book_imbalance,
+								intended_entry_price, fill_price, slippage, exit_price, pnl,
+								setup_description, created_at, updated_at
+						FROM trade_journal
+						WHERE symbol = %s AND timestamp >= NOW() - INTERVAL '%s days'
+						ORDER BY timestamp DESC
+					""", (symbol_filter, days_back))
+				else:
+					cur.execute("""
+						SELECT id, trade_id, symbol, timestamp, side, order_book_imbalance,
+								intended_entry_price, fill_price, slippage, exit_price, pnl,
+								setup_description, created_at, updated_at
+						FROM trade_journal
+						WHERE timestamp >= NOW() - INTERVAL '%s days'
+						ORDER BY timestamp DESC
+					""", (days_back,))
+				
+				rows = cur.fetchall()
+				cols = [desc[0] for desc in cur.description]
+				trades = [dict(zip(cols, row)) for row in rows]
+				
+				# Convert timestamps to ISO format for JSON
+				for trade in trades:
+					if trade['timestamp']:
+						trade['timestamp'] = trade['timestamp'].isoformat()
+					if trade['created_at']:
+						trade['created_at'] = trade['created_at'].isoformat()
+					if trade['updated_at']:
+						trade['updated_at'] = trade['updated_at'].isoformat()
+			
+			return jsonify(trades)
+	
+	except Exception as e:
+		error_logger.exception("/api/trade-journal failed: %s", e)
+		return jsonify({"error": str(e)}), 500
+
+
+@app.post('/api/trade-journal/log-exit')
+def api_log_trade_exit():
+	"""Manually log a trade exit (called when order is completed/GTT triggered)."""
+	try:
+		payload = request.get_json(silent=True) or {}
+		order_id = payload.get('order_id')
+		symbol = payload.get('symbol', '').upper()
+		exit_price = float(payload.get('exit_price', 0))
+		exit_qty = int(payload.get('exit_qty', 1))
+		exit_type = payload.get('exit_type', 'completed')  # 'completed', 'gtt_trigger', 'manual'
+		
+		if not order_id or exit_price <= 0:
+			return jsonify({"error": "order_id and exit_price required"}), 400
+		
+		_log_trade_exit(order_id, symbol, exit_price, exit_qty, exit_type)
+		return jsonify({"status": "exit logged", "order_id": order_id, "exit_price": exit_price}), 200
+	
+	except Exception as e:
+		order_logger.error("Failed to log exit via API: %s", e)
+		return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/trade-journal/sync-exits', methods=['POST'])
+def api_sync_trade_exits():
+	"""Sync all open trades with current orders and log exits for completed ones."""
+	from pgAdmin_database.db_connection import pg_cursor
+	
+	try:
+		kite = get_kite()
+		
+		# First check if trade_journal table exists, if not return early
+		with pg_cursor() as (cur, conn):
+			cur.execute("""
+				SELECT EXISTS (
+					SELECT FROM information_schema.tables 
+					WHERE table_name = 'trade_journal'
+				)
+			""")
+			table_exists = cur.fetchone()[0]
+			
+			if not table_exists:
+				# Table doesn't exist yet, nothing to sync
+				return jsonify({"status": "no trades to sync", "synced_count": 0}), 200
+		
+		# Get all open trades from journal
+		with pg_cursor() as (cur, conn):
+			cur.execute("""
+				SELECT id, order_id, symbol, entry_qty FROM trade_journal 
+				WHERE status = 'open' AND order_id IS NOT NULL
+			""")
+			open_trades = cur.fetchall()
+		
+		synced_count = 0
+		for trade_id, order_id, symbol, qty in open_trades:
+			try:
+				# Fetch order details from broker
+				orders = kite.orders() or []
+				matching_order = None
+				for order in orders:
+					if str(order.get('order_id')) == str(order_id):
+						matching_order = order
+						break
+				
+				if matching_order and matching_order.get('status') == 'COMPLETE':
+					# Order is complete, check if we logged the exit
+					with pg_cursor() as (cur, conn):
+						cur.execute("""
+							SELECT exit_price FROM trade_journal WHERE id = %s
+						""", (trade_id,))
+						result = cur.fetchone()
+						
+						if result and result[0] is None:  # No exit price yet
+							# Get fill price from order
+							fill_price = float(matching_order.get('average_price', 0))
+							if fill_price > 0:
+								_log_trade_exit(order_id, symbol, fill_price, qty, 'synced')
+								synced_count += 1
+			except Exception as e:
+				order_logger.warning("Error syncing order %s: %s", order_id, e)
+				continue
+		
+		return jsonify({"status": "sync complete", "synced_count": synced_count}), 200
+	
+	except Exception as e:
+		order_logger.error("Failed to sync exits: %s", e)
+		return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/trade-journal/stats', methods=['GET'])
+def api_trade_journal_stats():
+	"""Get trade journal statistics (win rate, avg PnL, etc)."""
+	from pgAdmin_database.db_connection import pg_cursor
+	
+	try:
+		symbol_filter = request.args.get('symbol')
+		days_back = int(request.args.get('days', 30))
+		
+		with pg_cursor() as (cur, conn):
+			if symbol_filter:
+				cur.execute("""
+					SELECT 
+						COUNT(*) as total_trades,
+						COUNT(CASE WHEN pnl > 0 THEN 1 END) as winning_trades,
+						COUNT(CASE WHEN pnl <= 0 THEN 1 END) as losing_trades,
+						ROUND(CAST(COUNT(CASE WHEN pnl > 0 THEN 1 END) AS FLOAT) / COUNT(*) * 100, 2) as win_rate_pct,
+						ROUND(CAST(COALESCE(SUM(pnl), 0) AS NUMERIC), 2) as total_pnl,
+						ROUND(CAST(AVG(pnl) AS NUMERIC), 2) as avg_pnl,
+						ROUND(CAST(MAX(pnl) AS NUMERIC), 2) as max_win,
+						ROUND(CAST(MIN(pnl) AS NUMERIC), 2) as max_loss,
+						symbol
+					FROM trade_journal
+					WHERE symbol = %s AND timestamp >= NOW() - INTERVAL '%s days'
+					GROUP BY symbol
+				""", (symbol_filter, days_back))
+			else:
+				cur.execute("""
+					SELECT 
+						COUNT(*) as total_trades,
+						COUNT(CASE WHEN pnl > 0 THEN 1 END) as winning_trades,
+						COUNT(CASE WHEN pnl <= 0 THEN 1 END) as losing_trades,
+						ROUND(CAST(COUNT(CASE WHEN pnl > 0 THEN 1 END) AS FLOAT) / COUNT(*) * 100, 2) as win_rate_pct,
+						ROUND(CAST(COALESCE(SUM(pnl), 0) AS NUMERIC), 2) as total_pnl,
+						ROUND(CAST(AVG(pnl) AS NUMERIC), 2) as avg_pnl,
+						ROUND(CAST(MAX(pnl) AS NUMERIC), 2) as max_win,
+						ROUND(CAST(MIN(pnl) AS NUMERIC), 2) as max_loss,
+						'Overall' as symbol
+					FROM trade_journal
+					WHERE timestamp >= NOW() - INTERVAL '%s days'
+				""", (days_back,))
+			
+			row = cur.fetchone()
+			if row:
+				cols = [desc[0] for desc in cur.description]
+				stats = dict(zip(cols, row))
+				return jsonify(stats)
+			else:
+				return jsonify({
+					"total_trades": 0,
+					"winning_trades": 0,
+					"losing_trades": 0,
+					"win_rate_pct": 0,
+					"total_pnl": 0,
+					"avg_pnl": 0,
+					"max_win": 0,
+					"max_loss": 0
+				})
+	
+	except Exception as e:
+		error_logger.exception("/api/trade-journal/stats failed: %s", e)
+		return jsonify({"error": str(e)}), 500
+
+
+# --------- DEBUG ENDPOINTS FOR TROUBLESHOOTING MISSING DATA ---------
+
+@app.route('/api/debug/missing-data', methods=['GET'])
+def debug_missing_data():
+	"""Show which symbols are missing specific data fields."""
+	try:
+		data = fetch_ltp()
+		
+		missing_drawdown = []
+		missing_pullback = []
+		missing_days_gc = []
+		missing_sma15m = []
+		missing_sma50_15m = []
+		missing_high200 = []
+		missing_low200 = []
+		missing_last_close = []
+		
+		for sym, values in data.items():
+			if values.get('drawdown_15m_200_pct') is None:
+				missing_drawdown.append(sym)
+			if values.get('pullback_15m_200_pct') is None:
+				missing_pullback.append(sym)
+			if values.get('days_since_golden_cross') is None:
+				missing_days_gc.append(sym)
+			if values.get('sma200_15m') is None:
+				missing_sma15m.append(sym)
+			if values.get('sma50_15m') is None:
+				missing_sma50_15m.append(sym)
+			# high200 is calculated from cache, so check for None
+			if values.get('sma200_15m') is None or values.get('last_price') is None:
+				missing_high200.append(sym)
+			if values.get('sma200_15m') is None or values.get('last_price') is None:
+				missing_low200.append(sym)
+			if values.get('last_close') is None:
+				missing_last_close.append(sym)
+		
+		total_symbols = len(data)
+		
+		return jsonify({
+			"total_symbols": total_symbols,
+			"missing_fields": {
+				"drawdown_15m_200_pct": {
+					"count": len(missing_drawdown),
+					"percentage": round(100 * len(missing_drawdown) / total_symbols, 1),
+					"first_20_symbols": sorted(missing_drawdown)[:20]
+				},
+				"pullback_15m_200_pct": {
+					"count": len(missing_pullback),
+					"percentage": round(100 * len(missing_pullback) / total_symbols, 1),
+					"first_20_symbols": sorted(missing_pullback)[:20]
+				},
+				"days_since_golden_cross": {
+					"count": len(missing_days_gc),
+					"percentage": round(100 * len(missing_days_gc) / total_symbols, 1),
+					"first_20_symbols": sorted(missing_days_gc)[:20]
+				},
+				"sma200_15m": {
+					"count": len(missing_sma15m),
+					"percentage": round(100 * len(missing_sma15m) / total_symbols, 1),
+					"first_20_symbols": sorted(missing_sma15m)[:20]
+				},
+				"sma50_15m": {
+					"count": len(missing_sma50_15m),
+					"percentage": round(100 * len(missing_sma50_15m) / total_symbols, 1),
+					"first_20_symbols": sorted(missing_sma50_15m)[:20]
+				},
+				"last_close": {
+					"count": len(missing_last_close),
+					"percentage": round(100 * len(missing_last_close) / total_symbols, 1),
+					"first_20_symbols": sorted(missing_last_close)[:20]
+				}
+			},
+			"status": "OK" if all([len(x) == 0 for x in [missing_drawdown, missing_pullback, missing_days_gc]]) else "INCOMPLETE"
+		})
+	except Exception as e:
+		error_logger.exception("debug_missing_data failed: %s", e)
+		return jsonify({"error": str(e), "type": type(e).__name__}), 500
+
+
+@app.route('/api/debug/cache-status', methods=['GET'])
+def debug_cache_status():
+	"""Show cache population status and sizes."""
+	try:
+		from ltp_service import (
+			_sma15m_cache, _sma15m_last_ts, _sma15m_lock,
+			_days_since_gc_cache, _days_since_gc_last_ts, _days_since_gc_lock,
+			_daily_ma_cache, _daily_ma_lock,
+			_high200_15m_cache, _low200_15m_cache, _last15m_close_cache,
+			_volratio_cache, _volratio_last_ts, _sr_cache, _sr_last_ts,
+			_vcp_cache, _vcp_last_ts
+		)
+		
+		with _sma15m_lock:
+			sma_size = len(_sma15m_cache)
+		with _days_since_gc_lock:
+			gc_size = len(_days_since_gc_cache)
+		with _daily_ma_lock:
+			daily_size = len(_daily_ma_cache)
+		
+		high200_size = len(_high200_15m_cache)
+		low200_size = len(_low200_15m_cache)
+		last_close_size = len(_last15m_close_cache)
+		volratio_size = len(_volratio_cache)
+		sr_size = len(_sr_cache)
+		vcp_size = len(_vcp_cache)
+		
+		return jsonify({
+			"caches": {
+				"sma15m_cache": {
+					"size": sma_size,
+					"last_refresh": _sma15m_last_ts.isoformat() if _sma15m_last_ts else None,
+					"status": "populated" if sma_size > 100 else "warming_up" if sma_size > 0 else "empty"
+				},
+				"high200_15m_cache": {
+					"size": high200_size,
+					"status": "populated" if high200_size > 100 else "warming_up" if high200_size > 0 else "empty"
+				},
+				"low200_15m_cache": {
+					"size": low200_size,
+					"status": "populated" if low200_size > 100 else "warming_up" if low200_size > 0 else "empty"
+				},
+				"last15m_close_cache": {
+					"size": last_close_size,
+					"status": "populated" if last_close_size > 100 else "warming_up" if last_close_size > 0 else "empty"
+				},
+				"days_since_gc_cache": {
+					"size": gc_size,
+					"last_refresh": _days_since_gc_last_ts.isoformat() if _days_since_gc_last_ts else None,
+					"status": "populated" if gc_size > 100 else "warming_up" if gc_size > 0 else "empty"
+				},
+				"daily_ma_cache": {
+					"size": daily_size,
+					"status": "populated" if daily_size > 100 else "warming_up" if daily_size > 0 else "empty"
+				},
+				"volratio_cache": {
+					"size": volratio_size,
+					"last_refresh": _volratio_last_ts.isoformat() if _volratio_last_ts else None,
+					"status": "populated" if volratio_size > 100 else "warming_up" if volratio_size > 0 else "empty"
+				},
+				"sr_cache": {
+					"size": sr_size,
+					"last_refresh": _sr_last_ts.isoformat() if _sr_last_ts else None,
+					"status": "populated" if sr_size > 100 else "warming_up" if sr_size > 0 else "empty"
+				},
+				"vcp_cache": {
+					"size": vcp_size,
+					"last_refresh": _vcp_last_ts.isoformat() if _vcp_last_ts else None,
+					"status": "populated" if vcp_size > 100 else "warming_up" if vcp_size > 0 else "empty"
+				}
+			},
+			"overall_status": "healthy" if sma_size > 100 and gc_size > 100 else "warming_up",
+			"note": "Caches populate on first fetch_ltp() call. If 'warming_up', wait 30-60 seconds and refresh."
+		})
+	except Exception as e:
+		error_logger.exception("debug_cache_status failed: %s", e)
+		return jsonify({"error": str(e), "type": type(e).__name__}), 500
+
+
+# -------- Momentum Strategy Integration --------
+try:
+	from momentum_strategy import register_strategy_routes
+	register_strategy_routes(app)
+	logging.getLogger("momentum_strategy").info("Momentum strategy routes registered")
+except ImportError as e:
+	logging.warning(f"Could not import momentum_strategy: {e}")
+except Exception as e:
+	logging.warning(f"Failed to register momentum strategy routes: {e}")
 
 
 if __name__ == "__main__":

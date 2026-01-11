@@ -55,6 +55,17 @@
 				"$python"
 			],
 			"group": "build"
+		},
+		{
+			"label": "Run Full Webapp (Ticker + Flask + Scanners)",
+			"type": "shell",
+			"command": "python3 Webapp/main.py --port 5050",
+			"args": [],
+			"isBackground": true,
+			"problemMatcher": [
+				"$python"
+			],
+			"group": "build"
 		}
 	]
 }

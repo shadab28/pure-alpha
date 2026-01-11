@@ -65,6 +65,7 @@
   <button id="tab-vcp" class="btn secondary">VCP</button>
   <button id="tab-orders" class="btn secondary">Orders</button>
   <button id="tab-active" class="btn secondary">Active Orderbook</button>
+  <button id="tab-trades" class="btn secondary">Trade Journal</button>
     </div>
 
     <!-- Main view -->
@@ -107,6 +108,7 @@
             <button id="ck-subtab-momentum" class="btn small active">Momentum</button>
             <button id="ck-subtab-reversals" class="btn small secondary">Reversals at Levels</button>
             <button id="ck-subtab-averages" class="btn small secondary">Averages</button>
+            <button id="ck-subtab-strategy" class="btn small secondary">Strategy</button>
           </div>
 
           <!-- Momentum sub-view -->
@@ -172,6 +174,128 @@
               <tbody></tbody>
             </table>
           </div>
+
+          <!-- Strategy sub-view -->
+          <div id="ck-view-strategy" style="display:none;">
+            <!-- Strategy Control Panel -->
+            <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:16px; padding:12px; background:#f8fafc; border-radius:8px; border:1px solid #e2e8f0;">
+              <div style="display:flex; align-items:center; gap:16px;">
+                <div>
+                  <span style="font-weight:600; color:#1e293b;">Momentum Strategy</span>
+                  <span id="strategy-status-badge" class="badge" style="margin-left:8px; background:#ef4444; color:white;">STOPPED</span>
+                </div>
+                <div style="font-size:13px; color:#64748b;">
+                  Per Position: ₹<span id="strategy-per-position">5,000</span> | 
+                  Positions: <span id="strategy-positions">0</span>/<span id="strategy-max-positions">20</span> |
+                  Today's PnL: ₹<span id="strategy-pnl-today" style="font-weight:600;">0</span>
+                </div>
+                <div id="strategy-timer-container" style="display:none; font-size:13px; padding:4px 10px; background:#fef3c7; border-radius:6px; border:1px solid #fcd34d;">
+                  <span style="color:#92400e;">⏱ Next scan in: </span>
+                  <span id="strategy-next-scan" style="font-weight:700; color:#b45309;">60s</span>
+                </div>
+              </div>
+              <div style="display:flex; gap:8px;">
+                <button id="btn-strategy-start" class="btn" onclick="startStrategy()" style="background:#22c55e; border-color:#22c55e;">
+                  ▶ Start Strategy
+                </button>
+                <button id="btn-strategy-stop" class="btn" onclick="stopStrategy()" style="background:#ef4444; border-color:#ef4444; display:none;">
+                  ■ Stop Strategy
+                </button>
+              </div>
+            </div>
+
+            <!-- Capital Summary Panel -->
+            <div style="display:grid; grid-template-columns:repeat(4, 1fr); gap:12px; margin-bottom:16px;">
+              <div style="padding:12px; background:#f0fdf4; border-radius:8px; border:1px solid #bbf7d0; text-align:center;">
+                <div style="font-size:12px; color:#15803d; margin-bottom:4px;">Total Capital</div>
+                <div style="font-size:18px; font-weight:700; color:#166534;">₹<span id="strategy-total-capital">100,000</span></div>
+              </div>
+              <div style="padding:12px; background:#eff6ff; border-radius:8px; border:1px solid #bfdbfe; text-align:center;">
+                <div style="font-size:12px; color:#1d4ed8; margin-bottom:4px;">Deployed Capital</div>
+                <div style="font-size:18px; font-weight:700; color:#1e40af;">₹<span id="strategy-deployed-capital">0</span></div>
+              </div>
+              <div style="padding:12px; background:#fefce8; border-radius:8px; border:1px solid #fef08a; text-align:center;">
+                <div style="font-size:12px; color:#a16207; margin-bottom:4px;">Current Value</div>
+                <div style="font-size:18px; font-weight:700; color:#a16207;">₹<span id="strategy-current-value">0</span></div>
+              </div>
+              <div style="padding:12px; background:#faf5ff; border-radius:8px; border:1px solid #e9d5ff; text-align:center;">
+                <div style="font-size:12px; color:#7c3aed; margin-bottom:4px;">Unrealized PnL</div>
+                <div style="font-size:18px; font-weight:700;" id="strategy-unrealized-pnl-container"><span id="strategy-unrealized-pnl">₹0</span></div>
+              </div>
+            </div>
+
+            <!-- Strategy Rules Summary -->
+            <div style="margin-bottom:16px; padding:12px; background:#eff6ff; border-radius:8px; border:1px solid #bfdbfe; font-size:13px;">
+              <div style="font-weight:600; color:#1e40af; margin-bottom:8px;">Position Ladder Rules:</div>
+              <div style="display:grid; grid-template-columns:repeat(3, 1fr); gap:12px;">
+                <div style="padding:8px; background:white; border-radius:6px; border:1px solid #dbeafe;">
+                  <div style="font-weight:600; color:#1e40af;">Position 1</div>
+                  <div style="color:#475569;">Entry: No active positions</div>
+                  <div style="color:#dc2626;">SL: -5% (fixed)</div>
+                  <div style="color:#16a34a;">Target: +10%</div>
+                </div>
+                <div style="padding:8px; background:white; border-radius:6px; border:1px solid #dbeafe;">
+                  <div style="font-weight:600; color:#1e40af;">Position 2</div>
+                  <div style="color:#475569;">Entry: P1 PnL > 0%</div>
+                  <div style="color:#dc2626;">SL: -5% (trailing)</div>
+                  <div style="color:#16a34a;">Target: +7.5%</div>
+                </div>
+                <div style="padding:8px; background:white; border-radius:6px; border:1px solid #dbeafe;">
+                  <div style="font-weight:600; color:#1e40af;">Position 3</div>
+                  <div style="color:#475569;">Entry: Avg(P1,P2) ≥ +2%</div>
+                  <div style="color:#dc2626;">SL: -5% (trailing)</div>
+                  <div style="color:#16a34a;">Target: Runner</div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Open Positions Table -->
+            <div style="margin-bottom:16px;">
+              <div style="font-weight:600; color:#1e293b; margin-bottom:8px;">Open Positions</div>
+              <table id="strategy-open-table">
+                <thead>
+                  <tr>
+                    <th>Position</th>
+                    <th>Symbol</th>
+                    <th>Entry Time</th>
+                    <th>Entry Price</th>
+                    <th>Qty</th>
+                    <th>LTP</th>
+                    <th>Stop Loss</th>
+                    <th>Target</th>
+                    <th>PnL %</th>
+                    <th>PnL ₹</th>
+                    <th>Action</th>
+                  </tr>
+                </thead>
+                <tbody id="strategy-open-tbody">
+                  <tr><td colspan="11" style="text-align:center; color:#94a3b8; padding:20px;">No open positions</td></tr>
+                </tbody>
+              </table>
+            </div>
+
+            <!-- Today's Closed Trades Table -->
+            <div>
+              <div style="font-weight:600; color:#1e293b; margin-bottom:8px;">Today's Closed Trades</div>
+              <table id="strategy-closed-table">
+                <thead>
+                  <tr>
+                    <th>Position</th>
+                    <th>Symbol</th>
+                    <th>Entry Time</th>
+                    <th>Entry Price</th>
+                    <th>Exit Time</th>
+                    <th>Exit Price</th>
+                    <th>Qty</th>
+                    <th>PnL ₹</th>
+                  </tr>
+                </thead>
+                <tbody id="strategy-closed-tbody">
+                  <tr><td colspan="8" style="text-align:center; color:#94a3b8; padding:20px;">No closed trades today</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -180,7 +304,7 @@
       <div class="card-header" style="display:flex;align-items:center;justify-content:space-between;">
         <span>VCP Breakout Patterns (15m Data)</span>
         <div style="display:flex; gap:10px; align-items:center; font-size:12px;">
-          <span class="muted">Deterministic, Non-Repainting</span>
+          <span class="muted">Mark Minervini Style - EMA50 Trend + ATR + Volume</span>
         </div>
       </div>
       <div class="card-body">
@@ -188,17 +312,18 @@
           <thead>
             <tr>
               <th data-key="symbol">Symbol</th>
-              <th data-key="stage">Stage</th>
+              <th data-key="pattern_stage">Pattern Stage</th>
+              <th data-key="entry_signal">Entry Signal</th>
+              <th data-key="confidence_score">Confidence</th>
               <th data-key="last_price">Current Price</th>
+              <th data-key="entry_price">Entry Price</th>
+              <th data-key="stop_loss">Stop Loss</th>
+              <th data-key="target">Target (3R)</th>
+              <th data-key="distance">Distance (%)</th>
               <th data-key="breakout_level">Breakout Level</th>
-              <th data-key="distance">Distance to Breakout (%)</th>
-              <th data-key="consolidation_low">Consolidation Low</th>
-              <th data-key="consolidation_high">Consolidation High</th>
               <th data-key="num_contractions">Contractions</th>
-              <th data-key="contraction_ranges">Pattern Detail (Range Contractions)</th>
-              <th data-key="volatility_trend">Volatility Trend</th>
+              <th data-key="volatility_trend">Vol Trend</th>
               <th data-key="signal">CK Signal</th>
-              <th data-key="action">CK Action</th>
               <th>Action</th>
             </tr>
           </thead>
@@ -284,13 +409,13 @@
         <table id="active-orders-table">
           <thead>
             <tr>
-              <th>Symbol</th>
-              <th>Order ID</th>
-              <th>Qty</th>
-              <th>Price</th>
-              <th>LTP</th>
-              <th>Status</th>
-              <th>Type</th>
+              <th data-key="symbol">Symbol</th>
+              <th data-key="order_id">Order ID</th>
+              <th data-key="qty">Qty</th>
+              <th data-key="price">Price</th>
+              <th data-key="ltp">LTP</th>
+              <th data-key="status">Status</th>
+              <th data-key="type">Type</th>
               <th>Actions</th>
             </tr>
           </thead>
@@ -301,14 +426,14 @@
         <table id="active-gtt-table">
           <thead>
             <tr>
-              <th>Symbol</th>
-              <th>GTT ID</th>
-              <th>Qty</th>
-              <th>LTP</th>
-              <th>Stop</th>
-              <th>Target</th>
-              <th>Type</th>
-              <th>Status</th>
+              <th data-key="symbol">Symbol</th>
+              <th data-key="gtt_id">GTT ID</th>
+              <th data-key="qty">Qty</th>
+              <th data-key="ltp">LTP</th>
+              <th data-key="stop">Stop</th>
+              <th data-key="target">Target</th>
+              <th data-key="type">Type</th>
+              <th data-key="status">Status</th>
               <th>Actions</th>
             </tr>
           </thead>
@@ -383,6 +508,71 @@
         </table>
       </div>
     </div>
+
+    <!-- Trade Journal view -->
+    <div id="view-trades" class="card" style="display:none; margin-top:14px;">
+      <div class="card-header" style="display:flex;align-items:center;justify-content:space-between;">
+        <span>Trade Journal <span id="trades-meta" class="muted"></span></span>
+        <div style="display:flex; gap:10px; align-items:center;">
+          <button class="btn secondary" id="btn-sync-exits" title="Sync open trades and log exits">Sync Exits</button>
+          <button class="btn secondary" id="btn-refresh-trades">Refresh</button>
+          <button class="btn secondary" id="btn-export-trades">Export CSV</button>
+        </div>
+      </div>
+      <div class="card-body">
+        <div style="display:flex; flex-wrap:wrap; gap:12px; align-items:flex-end; margin-bottom:10px;">
+          <div>
+            <div class="muted" style="font-size:12px;">Filter by Symbol</div>
+            <input id="tj-filter-symbol" type="text" placeholder="e.g., INFY" style="padding:6px; width:120px;" />
+          </div>
+          <div>
+            <div class="muted" style="font-size:12px;">Date Range (From)</div>
+            <input id="tj-filter-date-from" type="date" style="padding:6px; width:140px;" />
+          </div>
+          <div>
+            <div class="muted" style="font-size:12px;">Date Range (To)</div>
+            <input id="tj-filter-date-to" type="date" style="padding:6px; width:140px;" />
+          </div>
+          <div>
+            <button class="btn" id="tj-apply-filters">Apply Filters</button>
+            <button class="btn secondary" id="tj-reset-filters" style="margin-left:6px;">Reset</button>
+          </div>
+        </div>
+        <table id="trades-table">
+          <thead>
+            <tr>
+              <th data-key="symbol">Symbol</th>
+              <th data-key="entry_date">Entry Date</th>
+              <th data-key="entry_price">Entry Price</th>
+              <th data-key="entry_qty">Qty</th>
+              <th data-key="exit_date">Exit Date</th>
+              <th data-key="exit_price">Exit Price</th>
+              <th data-key="pnl">PnL (₹)</th>
+              <th data-key="pnl_pct">PnL %</th>
+              <th data-key="duration">Duration (hrs)</th>
+              <th data-key="strategy">Strategy</th>
+              <th data-key="status">Status</th>
+              <th data-key="notes">Notes</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+          <tfoot>
+            <tr>
+              <td colspan="6" style="text-align:right; font-weight:600;">Total PnL:</td>
+              <td id="trades-total-pnl-cell" class="num"></td>
+              <td id="trades-total-pnl-pct-cell" class="num"></td>
+            </tr>
+          </tfoot>
+        </table>
+        <div id="trades-summary" style="margin-top:12px; display:flex; gap:20px; font-size:13px;">
+          <div><span class="muted">Win Rate:</span> <span id="trades-winrate" class="num">-</span></div>
+          <div><span class="muted">Avg Win:</span> <span id="trades-avg-win" class="num">-</span></div>
+          <div><span class="muted">Avg Loss:</span> <span id="trades-avg-loss" class="num">-</span></div>
+          <div><span class="muted">Profit Factor:</span> <span id="trades-profit-factor" class="num">-</span></div>
+        </div>
+      </div>
+    </div>
+
     <script>
       // Map a numeric value to a green↔red color using HSL.
       // value in [min,max] -> hue in [0 (red), 120 (green)]
@@ -472,6 +662,12 @@
         const pbMin = (typeof opts.pbMin === 'number') ? opts.pbMin : -20;
         const pbMax = (typeof opts.pbMax === 'number') ? opts.pbMax : 20;
         const pbColor = pbVal != null ? pctColor(pbVal, pbMin, pbMax) : '';
+        
+        // Prepare supports/resistances display
+        let sup = (r.supports && r.supports.length) ? r.supports.join(', ') : '';
+        const userSup = userSupportLevels[r.symbol];
+        if (userSup != null) sup = sup ? sup + ', ' + userSup : userSup;
+        const resArr = (r.resistances && r.resistances.length) ? r.resistances.join(', ') : '';
 
         return `
           <td>${r.symbol}</td>
@@ -485,6 +681,8 @@
           <td>${r.ratio_15m_50_200 != null ? r.ratio_15m_50_200.toFixed(2) : ''}</td>
           <td><span class="num" style="color:${r.pct_vs_daily_sma50!=null? pctColor(r.pct_vs_daily_sma50) : ''}">${r.pct_vs_daily_sma50 != null ? r.pct_vs_daily_sma50.toFixed(2) + '%' : ''}</span></td>
           <td>${r.daily_ratio_50_200 != null ? r.daily_ratio_50_200.toFixed(2) : ''}</td>
+          <td>${sup}</td>
+          <td>${resArr}</td>
           <td>${r.volume_ratio_d5_d200 != null ? r.volume_ratio_d5_d200.toFixed(2) : ''}</td>
           <td><button class="btn small" onclick="placeBuy('${r.symbol}', this)" ${typeof r.last_price==='number' ? '' : 'disabled'}>Buy</button></td>
         `;
@@ -497,12 +695,7 @@
         tbody.innerHTML = '';
         for (const r of rows){
           const tr = document.createElement('tr');
-          // render supports/resistances arrays
-          let sup = (r.supports && r.supports.length) ? r.supports.join(', ') : '';
-          const userSup = userSupportLevels[r.symbol];
-          if (userSup != null) sup = sup ? sup + ', ' + userSup : userSup;
-          const resArr = (r.resistances && r.resistances.length) ? r.resistances.join(', ') : '';
-          tr.innerHTML = rowHtml(r).replace('</td>\n          <td>' + fmtNum(r.last_close) + '</td>', '</td>\n          <td>' + fmtNum(r.last_close) + '</td>\n          <td>' + sup + '</td>\n          <td>' + resArr + '</td>');
+          tr.innerHTML = rowHtml(r);
           tbody.appendChild(tr);
         }
       }
@@ -653,15 +846,16 @@
       const tabActive = document.getElementById('tab-active');
       const tabCK = document.getElementById('tab-ck');
       const tabVCP = document.getElementById('tab-vcp');
+      const tabTrades = document.getElementById('tab-trades');
 
       // Generic helper: show one view and highlight its tab with .active
       function setSelectedTab(tabEl, viewId){
         // hide all views
-        ['view-main','view-filtered','view-orders','view-active','view-ck','view-vcp'].forEach(id=>{
+        ['view-main','view-filtered','view-orders','view-active','view-ck','view-vcp','view-trades'].forEach(id=>{
           const v = document.getElementById(id); if (v) v.style.display = 'none';
         });
         // normalize classes: set all tabs to exactly 'btn secondary' (remove active)
-        [tabMain, tabFiltered, tabOrders, tabActive, tabCK, tabVCP].forEach(t=>{
+        [tabMain, tabFiltered, tabOrders, tabActive, tabCK, tabVCP, tabTrades].forEach(t=>{
           if (!t) return;
           t.classList.remove('active');
           t.classList.remove('secondary');
@@ -683,15 +877,17 @@
       if (tabActive) tabActive.addEventListener('click', ()=> { setSelectedTab(tabActive, 'view-active'); fetchActiveOrderbook(); });
   if (tabCK) tabCK.addEventListener('click', ()=> { setSelectedTab(tabCK, 'view-ck'); fetchCK(); });
   if (tabVCP) tabVCP.addEventListener('click', ()=> { setSelectedTab(tabVCP, 'view-vcp'); fetchVCP(); });
+  if (tabTrades) tabTrades.addEventListener('click', ()=> { setSelectedTab(tabTrades, 'view-trades'); fetchTrades(); });
 
   // Default to All (main) tab on load
   setSelectedTab(tabMain, 'view-main');
 
   // CK Sub-tabs logic
-  let ckActiveSubtab = 'momentum'; // 'momentum' or 'reversals'
+  let ckActiveSubtab = 'momentum'; // 'momentum', 'reversals', 'averages', or 'strategy'
   const ckSubtabMomentum = document.getElementById('ck-subtab-momentum');
   const ckSubtabReversals = document.getElementById('ck-subtab-reversals');
   const ckSubtabAverages = document.getElementById('ck-subtab-averages');
+  const ckSubtabStrategy = document.getElementById('ck-subtab-strategy');
 
   function setCKSubtab(subtab) {
     ckActiveSubtab = subtab;
@@ -699,10 +895,12 @@
     document.getElementById('ck-view-momentum').style.display = 'none';
     document.getElementById('ck-view-reversals').style.display = 'none';
     document.getElementById('ck-view-averages').style.display = 'none';
+    document.getElementById('ck-view-strategy').style.display = 'none';
     // Reset all sub-tab button styles
     ckSubtabMomentum.classList.remove('active'); ckSubtabMomentum.classList.add('secondary');
     ckSubtabReversals.classList.remove('active'); ckSubtabReversals.classList.add('secondary');
     ckSubtabAverages.classList.remove('active'); ckSubtabAverages.classList.add('secondary');
+    if (ckSubtabStrategy) { ckSubtabStrategy.classList.remove('active'); ckSubtabStrategy.classList.add('secondary'); }
     // Show selected view and highlight its button
     if (subtab === 'momentum') {
       ckSubtabMomentum.classList.remove('secondary'); ckSubtabMomentum.classList.add('active');
@@ -713,6 +911,10 @@
     } else if (subtab === 'averages') {
       ckSubtabAverages.classList.remove('secondary'); ckSubtabAverages.classList.add('active');
       document.getElementById('ck-view-averages').style.display = 'block';
+    } else if (subtab === 'strategy') {
+      ckSubtabStrategy.classList.remove('secondary'); ckSubtabStrategy.classList.add('active');
+      document.getElementById('ck-view-strategy').style.display = 'block';
+      fetchStrategyStatus(); // Fetch strategy status when switching to this tab
     }
     renderCKTables();
   }
@@ -720,6 +922,7 @@
   if (ckSubtabMomentum) ckSubtabMomentum.addEventListener('click', () => setCKSubtab('momentum'));
   if (ckSubtabReversals) ckSubtabReversals.addEventListener('click', () => setCKSubtab('reversals'));
   if (ckSubtabAverages) ckSubtabAverages.addEventListener('click', () => setCKSubtab('averages'));
+  if (ckSubtabStrategy) ckSubtabStrategy.addEventListener('click', () => setCKSubtab('strategy'));
 
   let ckInterval = null;
   let latestCKRows = [];
@@ -887,11 +1090,26 @@
   let sortStateVCP = { key: 'distance', dir: 'asc' };
 
   function renderVCPRowHtml(r) {
-    // Stage coloring: 'Broken Out' (green), 'Breakout Ready / At Level' (yellow), 'Consolidating' (blue), 'No Pattern' (gray)
-    let stageBg = '#f0f0f0';
-    if (r.stage === 'Broken Out') stageBg = '#d4edda'; // light green
-    else if (r.stage === 'Breakout Ready / At Level') stageBg = '#fff3cd'; // light yellow
-    else if (r.stage === 'Consolidating') stageBg = '#d1ecf1'; // light blue
+    // Pattern stage coloring based on phase
+    let patternBg = '#f0f0f0';
+    if (r.pattern_stage && r.pattern_stage.includes('Phase 4')) patternBg = '#d4edda'; // green - breakout
+    else if (r.pattern_stage && r.pattern_stage.includes('Phase 3')) patternBg = '#fff3cd'; // yellow - ready
+    else if (r.pattern_stage && (r.pattern_stage.includes('Phase 1') || r.pattern_stage.includes('Phase 2') || r.pattern_stage.includes('Consolidating'))) patternBg = '#d1ecf1'; // blue - building
+    else if (r.pattern_stage && r.pattern_stage.includes('EMA50')) patternBg = '#f8d7da'; // red - no trend
+    
+    // Entry signal coloring: 'BUY' (green), 'WATCH' (yellow), 'WAIT' (orange), 'NONE' (gray)
+    let signalBg = '#f0f0f0';
+    let signalColor = '#666';
+    if (r.entry_signal === 'BUY') { signalBg = '#28a745'; signalColor = '#fff'; }
+    else if (r.entry_signal === 'WATCH') { signalBg = '#ffc107'; signalColor = '#212529'; }
+    else if (r.entry_signal === 'WAIT') { signalBg = '#dc6317'; signalColor = '#fff'; }
+    
+    // Confidence score coloring
+    let confBg = '#f0f0f0';
+    let confScore = r.confidence_score != null ? r.confidence_score : 0;
+    if (confScore >= 0.7) confBg = '#d4edda'; // high confidence
+    else if (confScore >= 0.5) confBg = '#fff3cd'; // medium
+    else if (confScore > 0) confBg = '#f8d7da'; // low
     
     // Distance coloring: negative (red, below breakout), positive (green, above)
     let distanceBg = 'transparent';
@@ -900,32 +1118,27 @@
     }
     
     // Volatility trend icon
-    let volTrendIcon = r.volatility_trend === 'Decreasing' ? '↓' : '↑';
+    let volTrendIcon = r.volatility_trend === 'Decreasing' ? '↓' : (r.volatility_trend === 'Increasing' ? '↑' : '');
+    let volTrendBg = r.volatility_trend === 'Decreasing' ? '#d4edda' : (r.volatility_trend === 'Increasing' ? '#f8d7da' : 'transparent');
     
-    // Format contraction ranges as detailed pattern string
-    let patternDetail = '';
-    if (r.contraction_ranges && r.contraction_ranges.length > 0) {
-      patternDetail = r.contraction_ranges.map(v => v.toFixed(2)).join(' → ');
-    } else {
-      patternDetail = 'N/A';
-    }
+    // Trade button - enabled only for BUY or WATCH signals
+    const tradeDisabled = (typeof r.last_price === 'number' && (r.entry_signal === 'BUY' || r.entry_signal === 'WATCH')) ? '' : 'disabled';
+    const tradeBtnStyle = tradeDisabled ? 'background:#ccc;' : 'background:#28a745;color:#fff;';
     
-    // Trade button - disabled if no price or stage is "No Pattern"
-    const tradeDisabled = (typeof r.last_price === 'number' && r.stage !== 'No Pattern') ? '' : 'disabled';
-    
-    return `<td>${r.symbol}</td>
-            <td style="background-color: ${stageBg}; padding: 8px;">${r.stage || ''}</td>
+    return `<td style="font-weight:bold;">${r.symbol}</td>
+            <td style="background-color: ${patternBg}; padding: 6px; font-size: 11px;">${r.pattern_stage || 'No Pattern'}</td>
+            <td style="background-color: ${signalBg}; color: ${signalColor}; padding: 6px; font-weight: bold; text-align:center;">${r.entry_signal || 'NONE'}</td>
+            <td style="background-color: ${confBg}; text-align:center;">${confScore > 0 ? (confScore * 100).toFixed(0) + '%' : '-'}</td>
             <td>${r.last_price != null ? r.last_price.toFixed(2) : ''}</td>
+            <td style="color:#155724; font-weight:bold;">${r.entry_price != null ? r.entry_price.toFixed(2) : '-'}</td>
+            <td style="color:#dc3545; font-weight:bold;">${r.stop_loss != null ? r.stop_loss.toFixed(2) : '-'}</td>
+            <td style="color:#28a745; font-weight:bold;">${r.target != null ? r.target.toFixed(2) : '-'}</td>
+            <td style="background-color: ${distanceBg}; text-align:center;">${r.distance != null ? r.distance.toFixed(2) + '%' : ''}</td>
             <td>${r.breakout_level != null ? r.breakout_level.toFixed(2) : ''}</td>
-            <td style="background-color: ${distanceBg}; padding: 8px;">${r.distance != null ? r.distance.toFixed(2) + '%' : ''}</td>
-            <td>${r.consolidation_low != null ? r.consolidation_low.toFixed(2) : ''}</td>
-            <td>${r.consolidation_high != null ? r.consolidation_high.toFixed(2) : ''}</td>
-            <td>${r.num_contractions || ''}</td>
-            <td style="font-size: 11px; font-weight: bold;">${patternDetail}</td>
-            <td>${volTrendIcon} ${r.volatility_trend || ''}</td>
+            <td style="text-align:center;">${r.num_contractions || '-'}</td>
+            <td style="background-color: ${volTrendBg}; text-align:center;">${volTrendIcon} ${r.volatility_trend || '-'}</td>
             <td>${r.signal || ''}</td>
-            <td>${r.action || ''}</td>
-            <td><button class="btn small" onclick="placeBuy('${r.symbol}', this)" ${tradeDisabled}>Trade</button></td>`;
+            <td><button class="btn small" style="${tradeBtnStyle}" onclick="placeBuy('${r.symbol}', this)" ${tradeDisabled}>Trade</button></td>`;
   }
 
   function renderVCPTable() {
@@ -934,7 +1147,7 @@
     if (!tbody) return;
     tbody.innerHTML = '';
     if (latestVCPRows.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="13" class="muted">No VCP patterns detected</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="14" class="muted">No VCP patterns detected</td></tr>';
       return;
     }
     for (const r of latestVCPRows) {
@@ -956,16 +1169,18 @@
         const item = data[symbol] || {};
         return {
           symbol: symbol,
-          stage: item.stage || 'No Pattern',
+          pattern_stage: item.pattern_stage || 'No Pattern Detected',
+          entry_signal: item.entry_signal || 'NONE',
+          confidence_score: (typeof item.confidence_score === 'number') ? item.confidence_score : null,
           last_price: (typeof item.last_price === 'number') ? item.last_price : (item.last_price ? Number(item.last_price) : null),
+          entry_price: (typeof item.entry_price === 'number') ? item.entry_price : (item.entry_price ? Number(item.entry_price) : null),
+          stop_loss: (typeof item.stop_loss === 'number') ? item.stop_loss : (item.stop_loss ? Number(item.stop_loss) : null),
+          target: (typeof item.target === 'number') ? item.target : (item.target ? Number(item.target) : null),
           breakout_level: (typeof item.breakout_level === 'number') ? item.breakout_level : (item.breakout_level ? Number(item.breakout_level) : null),
           distance: (typeof item.distance_to_breakout === 'number') ? item.distance_to_breakout : (item.distance_to_breakout ? Number(item.distance_to_breakout) : null),
-          consolidation_low: (typeof item.consolidation_low === 'number') ? item.consolidation_low : (item.consolidation_low ? Number(item.consolidation_low) : null),
-          consolidation_high: (typeof item.consolidation_high === 'number') ? item.consolidation_high : (item.consolidation_high ? Number(item.consolidation_high) : null),
           num_contractions: item.num_contractions || 0,
           volatility_trend: item.volatility_trend || '',
-          signal: item.ck_signal || '',
-          action: item.ck_action || ''
+          signal: item.ck_signal || ''
         };
       });
       
@@ -984,6 +1199,426 @@
 
   // Attach sorting to VCP table
   attachSortingFor('vcp-table', sortStateVCP, renderVCPTable);
+
+  // Active Orderbook sorting
+  let sortStateActiveOrders = { key: 'symbol', dir: 'asc' };
+  let sortStateActiveGTT = { key: 'symbol', dir: 'asc' };
+
+  // Render functions need to apply sorting before rendering
+  function renderActiveOrdersWithSort(orders, ltpData) {
+    if (!orders || orders.length === 0) {
+      const tbody = document.querySelector('#active-orders-table tbody');
+      if (tbody) tbody.innerHTML = '<tr><td colspan="8" class="muted">No active orders</td></tr>';
+      return;
+    }
+    // Convert orders to sortable format
+    const rows = orders.map(o => ({
+      ...o,
+      symbol: o.tradingsymbol || o.symbol || o.instrument_token || '',
+      order_id: o.order_id || o.orderId || '',
+      qty: o.quantity || o.qty || o.pending_qty || '',
+      price: o.price || o.avg_price || '',
+      ltp: (ltpData && ltpData[o.tradingsymbol || o.symbol] && ltpData[o.tradingsymbol || o.symbol].last_price) ? ltpData[o.tradingsymbol || o.symbol].last_price : null,
+      status: o.status || '',
+      type: o.order_type || o.type || ''
+    }));
+    // Apply sort
+    applySort(rows, sortStateActiveOrders);
+    const tbody = document.querySelector('#active-orders-table tbody');
+    tbody.innerHTML = '';
+    for (const o of rows) {
+      const tr = document.createElement('tr');
+      const ltpStr = o.ltp ? parseFloat(o.ltp).toFixed(2) : '';
+      tr.innerHTML = `
+        <td>${o.symbol}</td>
+        <td>${o.order_id}</td>
+        <td>${o.qty}</td>
+        <td>${o.price}</td>
+        <td class="num">${ltpStr}</td>
+        <td>${o.status}</td>
+        <td>${o.type}</td>
+        <td>
+          ${o.order_id? `<button class="btn small" onclick="cancelOrder('${o.order_id}', '${o.symbol}', this)">Cancel</button>` : ''}
+        </td>
+      `;
+      tbody.appendChild(tr);
+    }
+  }
+
+  function renderActiveGTTsWithSort(gtts, ltpData) {
+    ltpData = ltpData || {};
+    const tbody = document.querySelector('#active-gtt-table tbody');
+    if (!gtts || Object.keys(gtts).length === 0) {
+      tbody.innerHTML = '<tr><td colspan="9" class="muted">No GTT orders</td></tr>';
+      return;
+    }
+    const list = Array.isArray(gtts) ? gtts : (gtts.items || gtts.gtts || Object.values(gtts));
+    if (!list || list.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="9" class="muted">No GTT orders</td></tr>';
+      return;
+    }
+    
+    // Convert GTTs to sortable format
+    const rows = [];
+    for (const g of list) {
+      const condition = g.condition || {};
+      const symbol = condition.tradingsymbol || g.tradingsymbol || g.symbol || '';
+      const gtt_id = g.id || g.gtt_id || g.trigger_id || '';
+      const triggerValues = condition.trigger_values || g.trigger_values || [];
+      const type = g.type || g.trigger_type || '';
+      const status = g.status || g.state || '';
+      
+      const orders = g.orders || [];
+      let qty = '';
+      if (Array.isArray(orders) && orders.length > 0) {
+        qty = orders[0].quantity || orders[0].qty || '';
+      }
+      
+      const ltpInfo = ltpData[symbol] || {};
+      const ltp = typeof ltpInfo.last_price === 'number' ? ltpInfo.last_price : null;
+      
+      let stopPrice = null;
+      let targetPrice = null;
+      if (Array.isArray(triggerValues) && triggerValues.length > 0) {
+        const vals = triggerValues.map(v => parseFloat(v)).filter(v => !isNaN(v)).sort((a,b) => a - b);
+        if (vals.length >= 2) {
+          stopPrice = vals[0];
+          targetPrice = vals[vals.length - 1];
+        } else if (vals.length === 1) {
+          stopPrice = vals[0];
+        }
+      }
+      
+      rows.push({
+        original: g,
+        symbol,
+        gtt_id,
+        qty: parseInt(qty) || 0,
+        ltp: ltp || 0,
+        stop: stopPrice || 0,
+        target: targetPrice || 0,
+        type,
+        status,
+        triggerValues,
+        stopPrice,
+        targetPrice,
+        ltpInfo
+      });
+    }
+    
+    // Apply sort
+    applySort(rows, sortStateActiveGTT);
+    tbody.innerHTML = '';
+    
+    for (const r of rows) {
+      const ltp = r.ltp;
+      const stopPrice = r.stopPrice;
+      const targetPrice = r.targetPrice;
+      
+      let stopStr = stopPrice !== null ? stopPrice.toFixed(2) : '';
+      let targetStr = targetPrice !== null ? targetPrice.toFixed(2) : '';
+      let stopStyle = '';
+      let targetStyle = '';
+      
+      if (ltp !== null && ltp !== 0 && stopPrice !== null) {
+        const stopPct = ((ltp - stopPrice) / ltp * 100).toFixed(1);
+        stopStr = `${stopPrice.toFixed(2)} (${stopPct}%)`;
+        if (parseFloat(stopPct) < 2) stopStyle = 'color: var(--danger); font-weight: 600;';
+        else if (parseFloat(stopPct) < 5) stopStyle = 'color: #b8860b; font-weight: 600;';
+        else stopStyle = 'color: var(--success);';
+      }
+      
+      if (ltp !== null && ltp !== 0 && targetPrice !== null) {
+        const targetPct = ((targetPrice - ltp) / ltp * 100).toFixed(1);
+        targetStr = `${targetPrice.toFixed(2)} (${targetPct}%)`;
+        if (parseFloat(targetPct) < 2) targetStyle = 'color: var(--success); font-weight: 600;';
+        else if (parseFloat(targetPct) < 5) targetStyle = 'color: #b8860b; font-weight: 600;';
+      }
+      
+      const tr = document.createElement('tr');
+      const gttType = (r.type === 'two-leg' || r.triggerValues.length >= 2) ? 'oco' : 'single';
+      const ltpStr = ltp && ltp !== 0 ? ltp.toFixed(2) : '';
+      
+      tr.innerHTML = `
+        <td>${r.symbol}</td>
+        <td>${r.gtt_id}</td>
+        <td class="num">${r.qty}</td>
+        <td class="num">${ltpStr}</td>
+        <td class="num" style="${stopStyle}">${stopStr}</td>
+        <td class="num" style="${targetStyle}">${targetStr}</td>
+        <td>${r.type}</td>
+        <td>${r.status}</td>
+        <td>
+          ${r.gtt_id && r.symbol && r.qty && stopPrice ? `<button class="btn small" onclick="startTrailing('${r.symbol}','${r.gtt_id}','${r.qty}','${stopPrice}','${gttType}','${targetPrice || 0}', this)" title="Enable trailing stop">Trail</button>` : ''}
+          ${r.gtt_id && r.symbol && ltp ? `<button class="btn small secondary" onclick="bookGTT('${r.gtt_id}','${r.symbol}','${r.qty}','${stopPrice}','${ltp}', this)" title="Set target to LTP, keep stop same">Book</button>` : ''}
+          ${r.gtt_id ? `<button class="btn small secondary" onclick="cancelGTT('${r.gtt_id}','${r.symbol}', this)">Cancel</button>` : ''}
+        </td>
+      `;
+      tbody.appendChild(tr);
+    }
+  }
+
+  // Attach sorting
+  attachSortingFor('active-orders-table', sortStateActiveOrders, () => {
+    // Fetch and re-render with new sort
+    fetchActiveOrderbook();
+  });
+  attachSortingFor('active-gtt-table', sortStateActiveGTT, () => {
+    fetchActiveOrderbook();
+  });
+
+  // ========== MOMENTUM STRATEGY FUNCTIONS ==========
+  let strategyInterval = null;
+  let strategyTimerInterval = null;  // For continuous countdown
+  let strategyNextScanSeconds = 60;  // Track countdown locally
+
+  async function fetchStrategyStatus() {
+    try {
+      const res = await fetch('/api/strategy/momentum/status');
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to fetch strategy status');
+      updateStrategyUI(data);
+    } catch (e) {
+      console.error('fetchStrategyStatus error:', e);
+      // Show error state
+      document.getElementById('strategy-status-badge').textContent = 'ERROR';
+      document.getElementById('strategy-status-badge').style.background = '#f97316';
+    }
+  }
+
+  function updateTimerDisplay() {
+    const nextScanEl = document.getElementById('strategy-next-scan');
+    if (!nextScanEl) return;
+    
+    nextScanEl.textContent = strategyNextScanSeconds + 's';
+    
+    // Color based on time remaining
+    if (strategyNextScanSeconds <= 10) {
+      nextScanEl.style.color = '#dc2626'; // Red when close
+    } else if (strategyNextScanSeconds <= 30) {
+      nextScanEl.style.color = '#ea580c'; // Orange
+    } else {
+      nextScanEl.style.color = '#b45309'; // Amber
+    }
+    
+    // Decrement for next tick
+    if (strategyNextScanSeconds > 0) {
+      strategyNextScanSeconds--;
+    }
+  }
+
+  function startTimerCountdown() {
+    // Clear any existing timer
+    if (strategyTimerInterval) {
+      clearInterval(strategyTimerInterval);
+    }
+    // Update every second
+    strategyTimerInterval = setInterval(updateTimerDisplay, 1000);
+  }
+
+  function stopTimerCountdown() {
+    if (strategyTimerInterval) {
+      clearInterval(strategyTimerInterval);
+      strategyTimerInterval = null;
+    }
+  }
+
+  function updateStrategyUI(data) {
+    // Update status badge
+    const badge = document.getElementById('strategy-status-badge');
+    const btnStart = document.getElementById('btn-strategy-start');
+    const btnStop = document.getElementById('btn-strategy-stop');
+    const timerContainer = document.getElementById('strategy-timer-container');
+    const nextScanEl = document.getElementById('strategy-next-scan');
+    
+    if (data.running) {
+      badge.textContent = 'RUNNING';
+      badge.style.background = '#22c55e';
+      btnStart.style.display = 'none';
+      btnStop.style.display = 'inline-block';
+      // Show timer when running
+      timerContainer.style.display = 'inline-block';
+      // Sync countdown from server
+      strategyNextScanSeconds = data.next_scan_in || 60;
+      updateTimerDisplay();
+      // Start continuous countdown if not running
+      if (!strategyTimerInterval) {
+        startTimerCountdown();
+      }
+    } else {
+      badge.textContent = 'STOPPED';
+      badge.style.background = '#ef4444';
+      btnStart.style.display = 'inline-block';
+      btnStop.style.display = 'none';
+      // Hide timer when stopped
+      stopTimerCountdown();
+      timerContainer.style.display = 'none';
+    }
+    
+    // Update capital info (new fields)
+    document.getElementById('strategy-per-position').textContent = (data.capital_per_position || 5000).toLocaleString();
+    document.getElementById('strategy-positions').textContent = data.active_positions || '0';
+    document.getElementById('strategy-max-positions').textContent = data.max_positions || '20';
+    
+    // Update capital summary panel
+    document.getElementById('strategy-total-capital').textContent = (data.total_capital || 100000).toLocaleString();
+    document.getElementById('strategy-deployed-capital').textContent = (data.deployed_capital || 0).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
+    document.getElementById('strategy-current-value').textContent = (data.current_value || 0).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
+    
+    // Update unrealized PnL with color
+    const unrealizedPnl = data.unrealized_pnl || 0;
+    const unrealizedEl = document.getElementById('strategy-unrealized-pnl');
+    const unrealizedContainer = document.getElementById('strategy-unrealized-pnl-container');
+    const sign = unrealizedPnl >= 0 ? '+' : '';
+    unrealizedEl.textContent = sign + '₹' + unrealizedPnl.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
+    unrealizedContainer.style.color = unrealizedPnl >= 0 ? '#16a34a' : '#dc2626';
+    
+    // Update realized PnL with color
+    const pnlEl = document.getElementById('strategy-pnl-today');
+    const pnl = data.realized_pnl_today || 0;
+    pnlEl.textContent = pnl.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
+    pnlEl.style.color = pnl >= 0 ? '#16a34a' : '#dc2626';
+    
+    // Update open positions table
+    const openTbody = document.getElementById('strategy-open-tbody');
+    if (data.open_trades && data.open_trades.length > 0) {
+      openTbody.innerHTML = data.open_trades.map(t => {
+        const pnlColor = (t.current_pnl_pct || 0) >= 0 ? '#16a34a' : '#dc2626';
+        return `<tr>
+          <td><span class="badge" style="background:#3b82f6;color:white;">P${t.position_number}</span></td>
+          <td><strong>${t.symbol}</strong></td>
+          <td>${new Date(t.entry_time).toLocaleTimeString()}</td>
+          <td>₹${t.entry_price?.toFixed(2) || '-'}</td>
+          <td>${t.qty}</td>
+          <td>₹${t.ltp?.toFixed(2) || '-'}</td>
+          <td style="color:#dc2626;">₹${t.stop_loss?.toFixed(2) || '-'}</td>
+          <td style="color:#16a34a;">${t.target ? '₹' + t.target.toFixed(2) : 'Runner'}</td>
+          <td style="color:${pnlColor};font-weight:600;">${t.current_pnl_pct?.toFixed(2) || '0.00'}%</td>
+          <td style="color:${pnlColor};font-weight:600;">₹${t.current_pnl_inr?.toFixed(2) || '0.00'}</td>
+          <td><button class="btn small" style="background:#ef4444;border-color:#ef4444;" onclick="closeStrategyTrade(${t.trade_id}, '${t.symbol}')">Close</button></td>
+        </tr>`;
+      }).join('');
+    } else {
+      openTbody.innerHTML = '<tr><td colspan="11" style="text-align:center; color:#94a3b8; padding:20px;">No open positions</td></tr>';
+    }
+    
+    // Update closed trades table
+    const closedTbody = document.getElementById('strategy-closed-tbody');
+    if (data.closed_trades_today && data.closed_trades_today.length > 0) {
+      closedTbody.innerHTML = data.closed_trades_today.map(t => {
+        const pnlColor = (t.pnl || 0) >= 0 ? '#16a34a' : '#dc2626';
+        return `<tr>
+          <td><span class="badge" style="background:#64748b;color:white;">P${t.position_number}</span></td>
+          <td>${t.symbol}</td>
+          <td>${new Date(t.entry_time).toLocaleTimeString()}</td>
+          <td>₹${t.entry_price?.toFixed(2) || '-'}</td>
+          <td>${t.exit_time ? new Date(t.exit_time).toLocaleTimeString() : '-'}</td>
+          <td>₹${t.exit_price?.toFixed(2) || '-'}</td>
+          <td>${t.qty}</td>
+          <td style="color:${pnlColor};font-weight:600;">₹${t.pnl?.toFixed(2) || '0.00'}</td>
+        </tr>`;
+      }).join('');
+    } else {
+      closedTbody.innerHTML = '<tr><td colspan="8" style="text-align:center; color:#94a3b8; padding:20px;">No closed trades today</td></tr>';
+    }
+  }
+
+  async function startStrategy() {
+    try {
+      const btnStart = document.getElementById('btn-strategy-start');
+      btnStart.disabled = true;
+      btnStart.textContent = 'Starting...';
+      
+      const res = await fetch('/api/strategy/momentum/start', { method: 'POST' });
+      const data = await res.json();
+      
+      if (!res.ok) throw new Error(data.error || 'Failed to start strategy');
+      
+      // Refresh status
+      await fetchStrategyStatus();
+      
+      // Start polling every 5 seconds (timer runs locally every 1s)
+      if (strategyInterval) clearInterval(strategyInterval);
+      strategyInterval = setInterval(fetchStrategyStatus, 5000);
+      
+    } catch (e) {
+      alert('Error starting strategy: ' + e.message);
+    } finally {
+      const btnStart = document.getElementById('btn-strategy-start');
+      btnStart.disabled = false;
+      btnStart.textContent = '▶ Start Strategy';
+    }
+  }
+
+  async function stopStrategy() {
+    try {
+      const ok = window.confirm('Are you sure you want to stop the strategy? Open positions will NOT be closed automatically.');
+      if (!ok) return;
+      
+      const btnStop = document.getElementById('btn-strategy-stop');
+      btnStop.disabled = true;
+      btnStop.textContent = 'Stopping...';
+      
+      const res = await fetch('/api/strategy/momentum/stop', { method: 'POST' });
+      const data = await res.json();
+      
+      if (!res.ok) throw new Error(data.error || 'Failed to stop strategy');
+      
+      // Stop polling and timer
+      if (strategyInterval) {
+        clearInterval(strategyInterval);
+        strategyInterval = null;
+      }
+      stopTimerCountdown();
+      
+      // Refresh status
+      await fetchStrategyStatus();
+      
+    } catch (e) {
+      alert('Error stopping strategy: ' + e.message);
+    } finally {
+      const btnStop = document.getElementById('btn-strategy-stop');
+      btnStop.disabled = false;
+      btnStop.textContent = '■ Stop Strategy';
+    }
+  }
+
+  async function closeStrategyTrade(tradeId, symbol) {
+    try {
+      const ok = window.confirm(`Close position in ${symbol}?`);
+      if (!ok) return;
+      
+      const res = await fetch(`/api/strategy/momentum/close/${tradeId}`, { method: 'POST' });
+      const data = await res.json();
+      
+      if (!res.ok) throw new Error(data.error || 'Failed to close trade');
+      
+      // Refresh status (no alert notification)
+      await fetchStrategyStatus();
+      
+    } catch (e) {
+      alert('Error closing trade: ' + e.message);
+    }
+  }
+
+  // Start polling when strategy tab is active
+  function manageStrategyPolling() {
+    const strategyView = document.getElementById('ck-view-strategy');
+    if (strategyView && strategyView.style.display !== 'none' && ckActiveSubtab === 'strategy') {
+      if (!strategyInterval) {
+        strategyInterval = setInterval(fetchStrategyStatus, 5000); // Poll every 5s, timer runs locally
+      }
+    } else {
+      if (strategyInterval) {
+        clearInterval(strategyInterval);
+        strategyInterval = null;
+      }
+      // Also stop timer countdown when not on strategy tab
+      stopTimerCountdown();
+    }
+  }
+
+  // ========== END MOMENTUM STRATEGY FUNCTIONS ==========
 
   // Filters handlers
       document.getElementById('apply-filters').addEventListener('click', ()=> renderFilteredTable());
@@ -1124,6 +1759,226 @@
         if (document.getElementById('view-orders').style.display==='block') fetchOrders();
       }, 5000);
 
+      // ========== Trade Journal Logic ==========
+      let latestTrades = [];
+      let sortStateTrades = { key: 'entry_date', dir: 'desc' };
+
+      async function syncTradeExits(){
+        try{
+          const res = await fetch('/api/trade-journal/sync-exits', {method: 'POST'});
+          const json = await res.json();
+          if (res.ok && json.synced_count > 0){
+            console.log(`Synced ${json.synced_count} trade exits`);
+            // Refresh trades to show updated exits
+            await fetchTrades();
+          }
+        }catch(e){
+          console.error('Exit sync error:', e);
+        }
+      }
+
+      async function fetchTrades(){
+        try{
+          const res = await fetch('/api/trades');
+          const json = await res.json();
+          if (!res.ok) throw new Error(json.error || 'Failed to fetch trades');
+          const arr = (json.trades || []).map(t=>({
+            symbol: t.symbol || t.tradingsymbol || '',
+            entry_date: t.entry_date || t.created_at || '',
+            entry_price: (typeof t.entry_price==='number')? t.entry_price : (t.entry_price? Number(t.entry_price): null),
+            entry_qty: (typeof t.entry_qty==='number')? t.entry_qty : (t.qty? Number(t.qty): (t.quantity ? Number(t.quantity) : null)),
+            exit_date: t.exit_date || t.closed_at || '',
+            exit_price: (typeof t.exit_price==='number')? t.exit_price : (t.exit_price? Number(t.exit_price): null),
+            pnl: (typeof t.pnl==='number')? t.pnl : (t.pnl? Number(t.pnl): null),
+            pnl_pct: (typeof t.pnl_pct==='number')? t.pnl_pct : (t.pnl_pct? Number(t.pnl_pct): null),
+            duration: t.duration || calculateDuration(t.entry_date || t.created_at, t.exit_date || t.closed_at) || '',
+            strategy: t.strategy || t.signal || '',
+            status: t.status || 'closed',
+            notes: t.notes || ''
+          }));
+          latestTrades = arr;
+          document.getElementById('trades-meta').textContent = `(${arr.length})`;
+          renderTradesTable();
+          calculateTradesSummary();
+        }catch(e){
+          const tbody = document.querySelector('#trades-table tbody');
+          if (tbody) tbody.innerHTML = `<tr><td colspan="12" class="muted">${e.message}</td></tr>`;
+          document.getElementById('trades-meta').textContent = '(error)';
+        }
+      }
+
+      function calculateDuration(startStr, endStr){
+        if (!startStr || !endStr) return null;
+        try {
+          const start = new Date(startStr);
+          const end = new Date(endStr);
+          if (isNaN(start) || isNaN(end)) return null;
+          const diffMs = end - start;
+          const diffHrs = diffMs / (1000 * 60 * 60);
+          return Math.round(diffHrs * 10) / 10; // 1 decimal place
+        } catch (e) {
+          return null;
+        }
+      }
+
+      function renderTradesTable(){
+        const tbody = document.querySelector('#trades-table tbody');
+        const filtered = applyTradesFilter(latestTrades);
+        applySort(filtered, sortStateTrades);
+        tbody.innerHTML = '';
+        for (const t of filtered){
+          const tr = document.createElement('tr');
+          const entryDate = t.entry_date ? new Date(t.entry_date).toLocaleDateString() : '';
+          const exitDate = t.exit_date ? new Date(t.exit_date).toLocaleDateString() : '';
+          tr.innerHTML = `
+            <td>${t.symbol||''}</td>
+            <td>${entryDate}</td>
+            <td>${fmtPrice(t.entry_price)}</td>
+            <td>${fmtMaybe(t.entry_qty)}</td>
+            <td>${exitDate}</td>
+            <td>${fmtPrice(t.exit_price)}</td>
+            <td><span class="num" style="${pnlColor(t.pnl)}">${fmtPrice(t.pnl)}</span></td>
+            <td><span class="num" style="${pnlColor(t.pnl_pct)}">${fmtPct(t.pnl_pct)}</span></td>
+            <td>${fmtMaybe(t.duration)}</td>
+            <td>${t.strategy||''}</td>
+            <td>${t.status||''}</td>
+            <td>${t.notes||''}</td>
+          `;
+          tbody.appendChild(tr);
+        }
+      }
+
+      function applyTradesFilter(trades){
+        const symbol = document.getElementById('tj-filter-symbol').value.trim().toUpperCase();
+        const dateFrom = document.getElementById('tj-filter-date-from').value;
+        const dateTo = document.getElementById('tj-filter-date-to').value;
+        
+        return trades.filter(t=>{
+          if (symbol && t.symbol && !t.symbol.toUpperCase().includes(symbol)) return false;
+          if (dateFrom){
+            const tDate = t.entry_date ? new Date(t.entry_date).toISOString().split('T')[0] : '';
+            if (tDate < dateFrom) return false;
+          }
+          if (dateTo){
+            const tDate = t.entry_date ? new Date(t.entry_date).toISOString().split('T')[0] : '';
+            if (tDate > dateTo) return false;
+          }
+          return true;
+        });
+      }
+
+      function calculateTradesSummary(){
+        const filtered = applyTradesFilter(latestTrades);
+        if (filtered.length === 0){
+          document.getElementById('trades-winrate').textContent = '-';
+          document.getElementById('trades-avg-win').textContent = '-';
+          document.getElementById('trades-avg-loss').textContent = '-';
+          document.getElementById('trades-profit-factor').textContent = '-';
+          document.getElementById('trades-total-pnl-cell').textContent = '₹0.00';
+          document.getElementById('trades-total-pnl-pct-cell').textContent = '0.00%';
+          return;
+        }
+
+        let totalPnl = 0;
+        let winCount = 0;
+        let lossCount = 0;
+        let totalWin = 0;
+        let totalLoss = 0;
+
+        for (const t of filtered){
+          const pnl = typeof t.pnl === 'number' ? t.pnl : 0;
+          totalPnl += pnl;
+          if (pnl > 0){
+            winCount++;
+            totalWin += pnl;
+          } else if (pnl < 0){
+            lossCount++;
+            totalLoss += Math.abs(pnl);
+          }
+        }
+
+        const winRate = filtered.length > 0 ? ((winCount / filtered.length) * 100) : 0;
+        const avgWin = winCount > 0 ? (totalWin / winCount) : 0;
+        const avgLoss = lossCount > 0 ? (totalLoss / lossCount) : 0;
+        const profitFactor = totalLoss > 0 ? (totalWin / totalLoss) : (totalWin > 0 ? Infinity : 0);
+
+        document.getElementById('trades-winrate').textContent = `${winRate.toFixed(1)}%`;
+        document.getElementById('trades-avg-win').textContent = `₹${avgWin.toFixed(2)}`;
+        document.getElementById('trades-avg-loss').textContent = `₹${avgLoss.toFixed(2)}`;
+        document.getElementById('trades-profit-factor').textContent = profitFactor === Infinity ? '∞' : profitFactor.toFixed(2);
+        
+        const totalColor = totalPnl >= 0 ? 'hsl(120,70%,38%)' : 'hsl(0,70%,38%)';
+        document.getElementById('trades-total-pnl-cell').textContent = `${totalPnl.toFixed(2)}`;
+        document.getElementById('trades-total-pnl-cell').style.color = totalColor;
+        
+        // Calculate average return percentage
+        let totalReturnPct = 0;
+        for (const t of filtered){
+          if (typeof t.pnl_pct === 'number') totalReturnPct += t.pnl_pct;
+        }
+        const avgReturnPct = filtered.length > 0 ? (totalReturnPct / filtered.length) : 0;
+        document.getElementById('trades-total-pnl-pct-cell').textContent = `${avgReturnPct.toFixed(2)}%`;
+        document.getElementById('trades-total-pnl-pct-cell').style.color = totalColor;
+      }
+
+      function exportTradesCSV(){
+        const filtered = applyTradesFilter(latestTrades);
+        if (filtered.length === 0){
+          alert('No trades to export');
+          return;
+        }
+
+        const headers = ['Symbol', 'Entry Date', 'Entry Price', 'Qty', 'Exit Date', 'Exit Price', 'PnL (₹)', 'PnL %', 'Duration (hrs)', 'Strategy', 'Status', 'Notes'];
+        const rows = filtered.map(t=>[
+          t.symbol,
+          t.entry_date,
+          t.entry_price || '',
+          t.entry_qty || '',
+          t.exit_date,
+          t.exit_price || '',
+          t.pnl || '',
+          t.pnl_pct || '',
+          t.duration || '',
+          t.strategy,
+          t.status,
+          t.notes
+        ]);
+
+        const csv = [headers.join(','), ...rows.map(r=>r.map(v=>`"${String(v).replace(/"/g,'""')}"`).join(','))].join('\n');
+        const blob = new Blob([csv], { type: 'text/csv' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `trades_${new Date().toISOString().split('T')[0]}.csv`;
+        a.click();
+        URL.revokeObjectURL(url);
+      }
+
+      // Trade Journal event listeners
+      document.getElementById('btn-refresh-trades').addEventListener('click', fetchTrades);
+      document.getElementById('btn-sync-exits').addEventListener('click', syncTradeExits);
+      document.getElementById('btn-export-trades').addEventListener('click', exportTradesCSV);
+      document.getElementById('tj-apply-filters').addEventListener('click', ()=>{
+        renderTradesTable();
+        calculateTradesSummary();
+      });
+      document.getElementById('tj-reset-filters').addEventListener('click', ()=>{
+        document.getElementById('tj-filter-symbol').value = '';
+        document.getElementById('tj-filter-date-from').value = '';
+        document.getElementById('tj-filter-date-to').value = '';
+        renderTradesTable();
+        calculateTradesSummary();
+      });
+      
+      // Auto-sync exits every 30 seconds
+      setInterval(syncTradeExits, 30000);
+      
+      // Attach sorting for trades table
+      attachSortingFor('trades-table', sortStateTrades, ()=>{
+        renderTradesTable();
+        calculateTradesSummary();
+      });
+
       // Active orderbook logic (broker active orders + GTTs)
       async function fetchActiveOrderbook(){
         try{
@@ -1134,125 +1989,11 @@
           if (!obRes.ok) throw new Error(obJson.error || 'Orderbook fetch failed');
           if (!gttRes.ok) throw new Error(gttJson.error || 'GTT fetch failed');
           const ltpData = ltpJson.data || {};
-          renderActiveOrders(obJson.orders || [], ltpData);
-          renderActiveGTTs(gttJson.items || gttJson.gtts || gttJson || [], ltpData);
+          renderActiveOrdersWithSort(obJson.orders || [], ltpData);
+          renderActiveGTTsWithSort(gttJson.items || gttJson.gtts || gttJson || [], ltpData);
         }catch(e){
           const tbody = document.querySelector('#active-orders-table tbody'); if (tbody) tbody.innerHTML = `<tr><td colspan="8" class="muted">${e.message}</td></tr>`;
-          const gtbody = document.querySelector('#active-gtt-table tbody'); if (gtbody) gtbody.innerHTML = `<tr><td colspan="8" class="muted">${e.message}</td></tr>`;
-        }
-      }
-
-      function renderActiveOrders(orders, ltpData){
-        ltpData = ltpData || {};
-        const tbody = document.querySelector('#active-orders-table tbody'); tbody.innerHTML = '';
-        if (!orders || orders.length===0){ tbody.innerHTML = '<tr><td colspan="8" class="muted">No active orders</td></tr>'; return; }
-        for (const o of orders){
-          const tr = document.createElement('tr');
-          const sym = o.tradingsymbol || o.symbol || o.instrument_token || '';
-          const ltp = ltpData[sym] && ltpData[sym].last_price ? ltpData[sym].last_price.toFixed(2) : '';
-          tr.innerHTML = `
-            <td>${sym}</td>
-            <td>${o.order_id||o.orderId||''}</td>
-            <td>${o.quantity||o.qty||o.pending_qty||''}</td>
-            <td>${o.price||o.avg_price||''}</td>
-            <td class="num">${ltp}</td>
-            <td>${o.status||''}</td>
-            <td>${o.order_type||o.type||''}</td>
-            <td>
-              ${o.order_id? `<button class="btn small" onclick="cancelOrder('${o.order_id}', '${sym}', this)">Cancel</button>` : ''}
-            </td>
-          `;
-          tbody.appendChild(tr);
-        }
-      }
-
-      function renderActiveGTTs(gtts, ltpData){
-        ltpData = ltpData || {};
-        const tbody = document.querySelector('#active-gtt-table tbody'); tbody.innerHTML = '';
-        if (!gtts || Object.keys(gtts).length===0){ tbody.innerHTML = '<tr><td colspan="9" class="muted">No GTT orders</td></tr>'; return; }
-        // gtts may be array or object keyed by id/symbol
-        const list = Array.isArray(gtts) ? gtts : (gtts.items || gtts.gtts || Object.values(gtts));
-        if (!list || list.length===0){ tbody.innerHTML = '<tr><td colspan="9" class="muted">No GTT orders</td></tr>'; return; }
-        for (const g of list){
-          // Handle Kite GTT structure: tradingsymbol and trigger_values are inside 'condition' object
-          const condition = g.condition || {};
-          const sym = condition.tradingsymbol || g.tradingsymbol || g.symbol || '';
-          const gid = g.id || g.gtt_id || g.trigger_id || '';
-          const triggerValues = condition.trigger_values || g.trigger_values || [];
-          const typ = g.type || g.trigger_type || '';
-          const status = g.status || g.state || '';
-          
-          // Get quantity from orders array
-          const orders = g.orders || [];
-          let qty = '';
-          if (Array.isArray(orders) && orders.length > 0) {
-            qty = orders[0].quantity || orders[0].qty || '';
-          }
-          
-          // Get LTP for this symbol
-          const ltpInfo = ltpData[sym] || {};
-          const ltp = typeof ltpInfo.last_price === 'number' ? ltpInfo.last_price : null;
-          const ltpStr = ltp !== null ? ltp.toFixed(2) : '';
-          
-          // Parse stop and target from trigger_values
-          // For OCO/two-leg: typically [stop, target] where stop < target
-          // For single: just one value
-          let stopPrice = null;
-          let targetPrice = null;
-          
-          if (Array.isArray(triggerValues) && triggerValues.length > 0) {
-            const vals = triggerValues.map(v => parseFloat(v)).filter(v => !isNaN(v)).sort((a,b) => a - b);
-            if (vals.length >= 2) {
-              // OCO: lower is stop, higher is target
-              stopPrice = vals[0];
-              targetPrice = vals[vals.length - 1];
-            } else if (vals.length === 1) {
-              // Single: assume it's a stop
-              stopPrice = vals[0];
-            }
-          }
-          
-          // Calculate % distance from LTP and color-code
-          let stopStr = stopPrice !== null ? stopPrice.toFixed(2) : '';
-          let targetStr = targetPrice !== null ? targetPrice.toFixed(2) : '';
-          let stopStyle = '';
-          let targetStyle = '';
-          
-          if (ltp !== null && stopPrice !== null) {
-            const stopPct = ((ltp - stopPrice) / ltp * 100).toFixed(1);
-            stopStr = `${stopPrice.toFixed(2)} (${stopPct}%)`;
-            // Color: red if close to stop (< 2%), yellow if < 5%, else green
-            if (parseFloat(stopPct) < 2) stopStyle = 'color: var(--danger); font-weight: 600;';
-            else if (parseFloat(stopPct) < 5) stopStyle = 'color: #b8860b; font-weight: 600;';
-            else stopStyle = 'color: var(--success);';
-          }
-          
-          if (ltp !== null && targetPrice !== null) {
-            const targetPct = ((targetPrice - ltp) / ltp * 100).toFixed(1);
-            targetStr = `${targetPrice.toFixed(2)} (${targetPct}%)`;
-            // Color: green if close to target (< 2%), yellow if < 5%, else black
-            if (parseFloat(targetPct) < 2) targetStyle = 'color: var(--success); font-weight: 600;';
-            else if (parseFloat(targetPct) < 5) targetStyle = 'color: #b8860b; font-weight: 600;';
-          }
-          
-          const tr = document.createElement('tr');
-          // Determine GTT type for trailing: 'oco' for two-leg, 'single' otherwise
-          const gttType = (typ === 'two-leg' || triggerValues.length >= 2) ? 'oco' : 'single';
-          tr.innerHTML = `
-            <td>${sym}</td>
-            <td>${gid}</td>
-            <td class="num">${qty}</td>
-            <td class="num">${ltpStr}</td>
-            <td class="num" style="${stopStyle}">${stopStr}</td>
-            <td class="num" style="${targetStyle}">${targetStr}</td>
-            <td>${typ}</td>
-            <td>${status}</td>
-            <td>
-              ${gid && sym && qty && stopPrice ? `<button class="btn small" onclick="startTrailing('${sym}','${gid}','${qty}','${stopPrice}','${gttType}','${targetPrice || 0}', this)" title="Enable trailing stop">Trail</button>` : ''}
-              ${gid? `<button class="btn small secondary" onclick="cancelGTT('${gid}','${sym}', this)">Cancel</button>` : ''}
-            </td>
-          `;
-          tbody.appendChild(tr);
+          const gtbody = document.querySelector('#active-gtt-table tbody'); if (gtbody) gtbody.innerHTML = `<tr><td colspan="9" class="muted">${e.message}</td></tr>`;
         }
       }
 
@@ -1313,6 +2054,45 @@
           console.error('Order cancel error:', e);
           alert(`Cancel error: ${e.message||e}`);
         }finally{ if (btn){ btn.disabled = false; btn.textContent = 'Cancel'; } }
+      }
+
+      // Book profit: set target to current LTP, keep stop same
+      async function bookGTT(gttId, symbol, qty, stopPrice, ltp, btn){
+        try{
+          if (!gttId || !symbol || ltp === undefined || ltp === null || ltp === '') return;
+          const cleanGttId = String(gttId).trim();
+          if (!cleanGttId) return;
+          
+          // Convert to numbers
+          const ltpNum = parseFloat(ltp);
+          const stopNum = parseFloat(stopPrice);
+          
+          if (isNaN(ltpNum) || isNaN(stopNum)) {
+            alert('Invalid LTP or Stop price');
+            return;
+          }
+          
+          if (!confirm(`Book profit for ${symbol}? Target will be set to current LTP (${ltpNum.toFixed(2)}), Stop will remain at ${stopNum.toFixed(2)}`)) return;
+          if (btn) { btn.disabled = true; btn.textContent = 'Booking…'; }
+          const res = await fetch('/api/gtt/book', { 
+            method: 'POST', 
+            headers: {'Content-Type':'application/json'}, 
+            body: JSON.stringify({
+              gtt_id: cleanGttId,
+              symbol: symbol,
+              qty: parseInt(qty),
+              stop_price: stopNum,
+              target_price: ltpNum
+            }) 
+          });
+          const j = await res.json();
+          if (!res.ok) throw new Error(j.error || `Book GTT failed: ${res.status}`);
+          alert(`Booked GTT ${cleanGttId} for ${symbol}. Target set to ${ltpNum.toFixed(2)}, Stop at ${stopNum.toFixed(2)}`);
+          fetchActiveOrderbook();
+        }catch(e){
+          console.error('GTT book error:', e);
+          alert(`Book GTT error: ${e.message||e}`);
+        }finally{ if (btn){ btn.disabled = false; btn.textContent = 'Book'; } }
       }
 
       async function cancelGTT(gttId, symbol, btn){
