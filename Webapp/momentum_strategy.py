@@ -246,8 +246,14 @@ class Broker:
                 
                 from kiteconnect import KiteConnect
                 
-                # Read API credentials
-                api_key = "da0ztb3q4k9ckiwn"
+                # Read API credentials from environment
+                api_key = os.getenv("KITE_API_KEY")
+                if not api_key:
+                    raise RuntimeError(
+                        "KITE_API_KEY environment variable not set. "
+                        "Please set it before running the application."
+                    )
+                
                 token_path = os.path.join(base_dir, "Core_files", "token.txt")
                 with open(token_path, "r") as f:
                     access_token = f.read().strip()
