@@ -1,16 +1,47 @@
 # pure-alpha webapp quick start
 
-- Copy `.env.example` to `.env` and fill values. Do not commit `.env` (ignored).
-- Generate `Core_files/token.txt` via `Core_files/auth.py` and keep it local.
-- Start LTP dashboard:
-  - Python: 3.11+
-  - Run: `python3 -m flask --app Webapp/app.py run --host 0.0.0.0 --port 5050`
+## ⚠️ IMPORTANT SECURITY NOTICE
 
-Notes
-- `.gitignore` prevents secrets and local caches from being tracked.
-- If `.env` or `token.txt` ever get added accidentally, run:
-  - `git rm --cached .env Core_files/token.txt`
-  - Commit and push.
+**API Key Setup Required:** See [SECURITY_ADVISORY.md](docs/SECURITY_ADVISORY.md) for critical security update.
+
+## Setup Instructions
+
+1. **Set API credentials** via environment variables:
+   ```bash
+   export KITE_API_KEY="your_api_key"
+   export KITE_API_SECRET="your_api_secret"
+   ```
+   
+   Or copy `.env.example` to `.env` and fill values:
+   ```bash
+   cp .env.example .env
+   # Edit .env with your credentials
+   source .env
+   ```
+
+2. **Generate access token** via `Core_files/auth.py`:
+   ```bash
+   python3 Core_files/auth.py
+   ```
+   This creates `Core_files/token.txt` (keep it local, don't commit)
+
+3. **Start LTP dashboard** (Python 3.11+ required):
+   ```bash
+   python3 Webapp/main.py --port 5050
+   ```
+   Or: `python3 -m flask --app Webapp/app.py run --host 127.0.0.1 --port 5050`
+
+## Security Notes
+
+- **Never commit `.env`, `token.txt`, or API keys** - already in `.gitignore`
+- API key is loaded from `KITE_API_KEY` environment variable (not hardcoded)
+- Access token is stored in `Core_files/token.txt` (local only, not committed)
+- If secrets accidentally get added, run:
+  ```bash
+  git rm --cached .env Core_files/token.txt
+  git commit -m "Remove accidentally committed secrets"
+  ```
+- **For git history cleanup:** See [SECURITY_ADVISORY.md](docs/SECURITY_ADVISORY.md)
 
 Troubleshooting
 - Import error for kiteconnect: project includes local `kiteconnect/` fallback.
