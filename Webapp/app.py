@@ -133,13 +133,17 @@ app = init_auth(app)
 app = init_csrf(app)
 
 # -------- Rate Limiting Setup --------
-# Initialize rate limiter for trading endpoints
+# Initialize rate limiter for trading endpoints (suppress info logs)
 limiter = Limiter(
 	app=app,
 	key_func=get_remote_address,
 	default_limits=["200 per day", "50 per hour"],
-	storage_uri="memory://"
+	storage_uri="memory://",
+	in_memory_fallback_enabled=True
 )
+
+# Suppress flask-limiter INFO logs (rate limit exceeded messages)
+logging.getLogger("flask_limiter").setLevel(logging.WARNING)
 
 # -------- Logging setup (date-wise subfolders) --------
 LOG_BASE_DIR = os.path.join(REPO_ROOT, 'logs')
