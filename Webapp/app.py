@@ -67,11 +67,70 @@ except ImportError:
 			return response
 		return app
 
+# Import authentication modules
+try:
+	from auth import (
+		init_auth, get_current_user, login_user, logout_user,
+		require_login, hash_password, verify_password, User, UserRole
+	)
+except ImportError:
+	# Fallback if auth module not available
+	def init_auth(app):
+		return app
+	def get_current_user():
+		return None
+	def login_user(user):
+		pass
+	def logout_user():
+		pass
+	def require_login(required_role=None):
+		def decorator(f):
+			return f
+		return decorator
+	def hash_password(pwd):
+		return pwd
+	def verify_password(pwd, hashed):
+		return pwd == hashed
+	class User:
+		pass
+	class UserRole:
+		pass
+
+try:
+	from csrf_protection import init_csrf, generate_csrf_token, validate_csrf_token, csrf_protect, CSRFError
+except ImportError:
+	# Fallback if CSRF module not available
+	def init_csrf(app):
+		return app
+	def generate_csrf_token():
+		return ""
+	def validate_csrf_token(token):
+		return True
+	def csrf_protect(f):
+		return f
+	class CSRFError(Exception):
+		pass
+
 app = Flask(__name__, template_folder="templates")
 
 # -------- Security Headers Setup --------
 # Add OWASP-recommended security headers to all responses
 app = add_security_headers(app)
+
+# -------- Authentication & CSRF Setup --------
+# Set secret key for session/CSRF management
+if not app.secret_key:
+	app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'dev-secret-key-change-in-production')
+
+# Secure session configuration
+app.config['SESSION_COOKIE_SECURE'] = True  # HTTPS only
+app.config['SESSION_COOKIE_HTTPONLY'] = True  # No JavaScript access
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'  # CSRF protection
+app.config['PERMANENT_SESSION_LIFETIME'] = 3600  # 1 hour session
+
+# Initialize authentication and CSRF protection
+app = init_auth(app)
+app = init_csrf(app)
 
 # -------- Rate Limiting Setup --------
 # Initialize rate limiter for trading endpoints
@@ -856,6 +915,163 @@ def api_gtt_list():
 			error_logger.exception("/api/gtt failed: %s", e)
 			return jsonify({"error": str(e)}), 500
 
+# ============================================================================
+# AUTHENTICATION ENDPOINTS (Phase 3B)
+# ============================================================================
+
+@app.post("/api/auth/login")
+def api_login():
+	"""
+	Login endpoint - authenticates user with email and password.
+	
+	Request body:
+		{
+			"email": "user@example.com",
+			"password": "secure_password",
+			"csrf_token": "..."
+		}
+	
+	Response:
+		{
+			"success": true,
+			"user": {
+				"user_id": 1,
+				"username": "john",
+				"email": "john@example.com",
+				"role": "TRADER"
+			}
+		}
+	"""
+	try:
+		# Validate CSRF token
+		try:
+			csrf_token = request.get_json(silent=True, force=True).get('csrf_token')
+			if csrf_token:
+				validate_csrf_token(csrf_token)
+		except CSRFError as e:
+			order_logger.warning("Login CSRF validation failed: %s", e)
+			return jsonify({"error": "CSRF validation failed"}), 403
+		
+		payload = request.get_json(force=True)
+		email = payload.get('email', '').strip()
+		password = payload.get('password', '')
+		
+		# Validate input
+		if not email or not password:
+			return jsonify({"error": "Email and password required"}), 400
+		
+		# TODO: Query user from database
+		# This is a placeholder - in production, query user from DB
+		# user = db.query_user_by_email(email)
+		# if not user or not verify_password(password, user.password_hash):
+		#     return jsonify({"error": "Invalid credentials"}), 401
+		
+		# For now, create a test user (remove in production)
+		if email == 'demo@example.com' and password == 'DemoPass123!':
+			from datetime import datetime
+			user = User(
+				user_id=1,
+				username='demo',
+				email='demo@example.com',
+				role=UserRole.TRADER,
+				created_at=datetime.now(),
+			)
+			login_user(user)
+			order_logger.info("User logged in: %s", email)
+			return jsonify({
+				"success": True,
+				"user": user.to_dict()
+			}), 200
+		
+		return jsonify({"error": "Invalid credentials"}), 401
+		
+	except Exception as e:
+		error_logger.exception("/api/auth/login failed: %s", e)
+		return jsonify({"error": str(e)}), 500
+
+
+@app.post("/api/auth/logout")
+@require_login()
+def api_logout():
+	"""
+	Logout endpoint - clears user session.
+	
+	Request body:
+		{
+			"csrf_token": "..."
+		}
+	
+	Response:
+		{
+			"success": true
+		}
+	"""
+	try:
+		# Validate CSRF token
+		try:
+			csrf_token = request.get_json(silent=True, force=True).get('csrf_token')
+			if csrf_token:
+				validate_csrf_token(csrf_token)
+		except CSRFError as e:
+			order_logger.warning("Logout CSRF validation failed: %s", e)
+			return jsonify({"error": "CSRF validation failed"}), 403
+		
+		user = get_current_user()
+		logout_user()
+		order_logger.info("User logged out: %s", user.username if user else "unknown")
+		
+		return jsonify({"success": True}), 200
+		
+	except Exception as e:
+		error_logger.exception("/api/auth/logout failed: %s", e)
+		return jsonify({"error": str(e)}), 500
+
+
+@app.get("/api/auth/me")
+@require_login()
+def api_auth_me():
+	"""
+	Get current user endpoint - returns authenticated user info.
+	
+	Response:
+		{
+			"user_id": 1,
+			"username": "john",
+			"email": "john@example.com",
+			"role": "TRADER",
+			"created_at": "2026-01-14T10:00:00"
+		}
+	"""
+	try:
+		user = get_current_user()
+		if not user:
+			return jsonify({"error": "Not authenticated"}), 401
+		
+		return jsonify(user.to_dict()), 200
+		
+	except Exception as e:
+		error_logger.exception("/api/auth/me failed: %s", e)
+		return jsonify({"error": str(e)}), 500
+
+
+@app.get("/api/auth/csrf")
+def api_get_csrf_token():
+	"""
+	Get CSRF token endpoint - returns token for form submissions.
+	
+	Response:
+		{
+			"csrf_token": "..."
+		}
+	"""
+	try:
+		token = generate_csrf_token()
+		return jsonify({"csrf_token": token}), 200
+		
+	except Exception as e:
+		error_logger.exception("/api/auth/csrf failed: %s", e)
+		return jsonify({"error": str(e)}), 500
+
 @app.route("/")
 def index():
 	# Ensure we are listening to order updates
@@ -1365,6 +1581,8 @@ def _log_trade_exit(order_id, symbol, exit_price, exit_qty, exit_type='completed
 
 @app.post("/api/order/buy")
 @limiter.limit("5 per minute")  # Max 5 buy orders per minute per IP
+@csrf_protect  # CSRF token validation
+@require_login(required_role=UserRole.TRADER)  # Require trader role
 def api_place_buy():
 	"""Place a CNC LIMIT buy at LTP with budget INR 10,000 (adjust quantity)."""
 	try:
@@ -1399,7 +1617,9 @@ def api_place_buy():
 		use_market = bool(payload.get('market', False))
 		# ===== END VALIDATION =====
 		
-		order_logger.info("ORDER_REQ symbol=%s budget=%.2f offset=%.4f market=%s tsl=%s sl_pct=%.3f from=%s", symbol, budget, offset_pct, use_market, with_tsl, sl_pct, request.remote_addr)
+		# Log authenticated user
+		user = get_current_user()
+		order_logger.info("ORDER_REQ symbol=%s budget=%.2f offset=%.4f market=%s tsl=%s sl_pct=%.3f user=%s from=%s", symbol, budget, offset_pct, use_market, with_tsl, sl_pct, user.username if user else "anonymous", request.remote_addr)
 		kite = get_kite()
 		# Fetch fresh LTP
 		qd = kite.quote([f"NSE:{symbol}"]) or {}
