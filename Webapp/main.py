@@ -81,6 +81,56 @@ TOKEN_PATH = os.path.join(REPO_ROOT, "Core_files", "token.txt")
 INSTRUMENTS_CSV = os.path.join(REPO_ROOT, "Csvs", "instruments.csv")
 
 # -------------------------------------------------------------------
+# ANSI Color Codes for Terminal Output
+# -------------------------------------------------------------------
+class Colors:
+    """ANSI color codes for terminal output."""
+    # Text Colors
+    GREEN = '\033[92m'      # Bright green
+    CYAN = '\033[96m'       # Bright cyan
+    YELLOW = '\033[93m'     # Bright yellow
+    RED = '\033[91m'        # Bright red
+    BLUE = '\033[94m'       # Bright blue
+    MAGENTA = '\033[95m'    # Bright magenta
+    WHITE = '\033[97m'      # Bright white
+    
+    # Background Colors
+    BG_GREEN = '\033[102m'  # Bright green background
+    BG_BLUE = '\033[104m'   # Bright blue background
+    
+    # Styles
+    BOLD = '\033[1m'        # Bold text
+    DIM = '\033[2m'         # Dim text
+    
+    # Reset
+    RESET = '\033[0m'       # Reset all formatting
+    
+    @staticmethod
+    def green(text):
+        """Return text in green."""
+        return f"{Colors.GREEN}{text}{Colors.RESET}"
+    
+    @staticmethod
+    def cyan(text):
+        """Return text in cyan."""
+        return f"{Colors.CYAN}{text}{Colors.RESET}"
+    
+    @staticmethod
+    def yellow(text):
+        """Return text in yellow."""
+        return f"{Colors.YELLOW}{text}{Colors.RESET}"
+    
+    @staticmethod
+    def bold_green(text):
+        """Return text in bold green."""
+        return f"{Colors.BOLD}{Colors.GREEN}{text}{Colors.RESET}"
+    
+    @staticmethod
+    def bold_cyan(text):
+        """Return text in bold cyan."""
+        return f"{Colors.BOLD}{Colors.CYAN}{text}{Colors.RESET}"
+
+# -------------------------------------------------------------------
 # Thread-safe LTP Store (shared with ltp_service)
 # -------------------------------------------------------------------
 class LTPStore:
@@ -321,7 +371,8 @@ def run_scanners_periodic(interval_seconds: int = 300):
     
     thread = threading.Thread(target=worker, name="scanner_worker", daemon=True)
     thread.start()
-    logging.info("Scanner worker started (interval=%ds)", interval_seconds)
+    interval_display = Colors.bold_green(f"interval={interval_seconds}s")
+    logging.info(f"Scanner worker started ({interval_display})")
     return thread
 
 
@@ -339,7 +390,8 @@ def run_flask_server(host: str, port: int):
     
     thread = threading.Thread(target=worker, name="flask_server", daemon=True)
     thread.start()
-    logging.info("Flask server started on http://%s:%d", host, port)
+    flask_url = f"http://{host}:{port}"
+    logging.info(f"Flask server started on {Colors.bold_green(flask_url)}")
     return thread
 
 
@@ -350,7 +402,7 @@ def run(
     universe_override: Optional[str] = None,
     mode: str = 'ltp',
     log_level: str = 'INFO',
-    host: str = '0.0.0.0',
+    host: str = '127.0.0.1',
     port: int = 5050,
     scanner_interval: int = 300
 ):
@@ -387,7 +439,8 @@ def run(
     
     # Load symbols
     symbols = load_symbol_list(universe_name)
-    logging.info("Loaded %d symbols from %s", len(symbols), universe_name)
+    symbols_msg = Colors.bold_green(f"Loaded {len(symbols)} symbols from {universe_name}")
+    logging.info(symbols_msg)
     
     # Get Kite API credentials
     api_key = os.getenv("KITE_API_KEY")
@@ -403,7 +456,8 @@ def run(
     # Initialize Kite
     kite = KiteConnect(api_key=api_key)
     kite.set_access_token(access_token)
-    logging.info("Kite API initialized")
+    kite_msg = Colors.bold_green("Kite API initialized")
+    logging.info(kite_msg)
     
     # Ensure instruments CSV exists
     ensure_instruments_csv(kite, INSTRUMENTS_CSV)
@@ -415,7 +469,9 @@ def run(
     if not tokens:
         raise SystemExit("No tokens resolved for the selected universe. Check instruments CSV and symbols.")
     
-    logging.info("Resolved %d tokens for subscription", len(tokens))
+    tokens_msg = Colors.bold_green(f"Resolved {len(tokens)} tokens for subscription")
+    tokens_msg = f"Resolved {Colors.bold_green(len(tokens))} tokens for subscription"
+    logging.info(tokens_msg)
     
     # Ensure database table
     ensure_ohlcv_table()
@@ -452,7 +508,8 @@ def run(
     
     def on_connect(ws, response):
         """Handle connection."""
-        logging.info("Ticker connected. Subscribing to %d tokens in %s mode...", len(tokens), mode)
+        conn_msg = Colors.bold_green(f"Ticker connected. Subscribing to {len(tokens)} tokens in {mode} mode...")
+        logging.info(conn_msg)
         ws.subscribe(tokens)
         if mode.lower() == 'ltp':
             ws.set_mode(ws.MODE_LTP, tokens)
@@ -475,7 +532,8 @@ def run(
     kws.on_error = on_error
     kws.connect(threaded=True)
     
-    logging.info("KiteTicker connected in threaded mode")
+    kws_msg = Colors.bold_green("KiteTicker connected in threaded mode")
+    logging.info(kws_msg)
     
     # -------------------------------------------------------------------
     # Main monitoring loop
@@ -556,8 +614,8 @@ Examples:
                         help='Streaming mode')
     parser.add_argument('--log-level', default='INFO', 
                         help='Logging level (DEBUG, INFO, WARNING)')
-    parser.add_argument('--host', default='0.0.0.0', 
-                        help='Flask host (default: 0.0.0.0)')
+    parser.add_argument('--host', default='127.0.0.1', 
+                        help='Flask host (default: 127.0.0.1 - localhost only)')
     parser.add_argument('--port', type=int, default=5050, 
                         help='Flask port (default: 5050)')
     parser.add_argument('--scanner-interval', type=int, default=300, 

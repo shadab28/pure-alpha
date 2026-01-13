@@ -1723,7 +1723,8 @@ def register_strategy_routes(app):
                         "error": "LIVE mode blocked: MIN_RANK_GM_THRESHOLD must be > 0",
                         "safety": "Rank_GM_Threshold_Not_Set"
                     }), 400
-                logger.warning(f"🔴 LIVE MODE ACTIVATED - Real orders will be placed!")
+                live_mode_msg = f"{Colors.BOLD}{Colors.RED}🔴 LIVE MODE ACTIVATED - Real orders will be placed!{Colors.RESET}"
+                logger.warning(live_mode_msg)
             
             # Set broker mode
             strategy.broker.set_mode(mode)
