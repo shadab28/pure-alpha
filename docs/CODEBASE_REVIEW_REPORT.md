@@ -945,18 +945,29 @@ services:
 
 2. ✅ **Rotate compromised API key** via Zerodha Console
    - **Status:** COMPLETED
-   - **Exposed Key:** `da0ztb3q4k9ckiwn` (deleted from Zerodha)
    - **New Key:** Set via environment variable
    - **See:** [API_KEY_ROTATION_GUIDE.md](API_KEY_ROTATION_GUIDE.md) for detailed instructions
 
 3. ✅ **Disable debug mode** in production configuration
-   - **Status:** COMPLETED (commit: upcoming)
+   - **Status:** COMPLETED (commit: f2b1b90)
    - Changed from `debug=True` to environment variable controlled
    - Default: `debug=False` for safety
    - Host binding: `127.0.0.1` (localhost only) by default
    - Can be enabled via `FLASK_DEBUG=true` environment variable
-4. [ ] **Add `.env` to `.gitignore`** if not present
-5. [ ] **Verify localhost binding** for Flask server
+   - See: [FLASK_CONFIGURATION.md](FLASK_CONFIGURATION.md) for detailed setup
+
+4. ✅ **Add `.env` to `.gitignore`** if not present
+   - **Status:** COMPLETED (verified)
+   - Pattern `.env` already present in `.gitignore` (line 8)
+   - Additional patterns: `.env.*` (line 9)
+   - Safe: All environment files are protected from git commits
+
+5. ✅ **Verify localhost binding** for Flask server
+   - **Status:** COMPLETED (verified)
+   - Default host: `127.0.0.1` (localhost only)
+   - Configuration: `FLASK_HOST` environment variable controls binding
+   - Safe: Requires explicit opt-in to expose to network
+   - Location: `Webapp/app.py` lines 2318-2329
 
 ### Phase 2: High Priority (1 week)
 
