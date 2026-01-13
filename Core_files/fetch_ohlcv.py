@@ -380,33 +380,45 @@ def main():
             # This enables VCP analysis across entire portfolio
             for label, kite_tf in zip(timeframe_labels, kite_timeframes):
                 today = datetime.utcnow().date()
+                yesterday = today - timedelta(days=1)
                 
                 # Always fetch 15m data for intraday VCP analysis (enabled for all stocks as of Jan 9)
                 if kite_tf == '15minute' or label == '15m':
-                    print(f"Fetching 15m intraday data for {s}")
+                    print(f"Fetching last 200 15m candles for {s} (spanning up to 8 days for holidays)")
                     try:
-                        intraday_start = datetime.combine(today, datetime.min.time())
-                        intraday_end = datetime.combine(today, datetime.max.time())
-                        c = _call_historical(kite, instr, intraday_start, intraday_end, '15minute')
+                        # Fetch last 8 days (spans market holidays) to get 200+ 15m candles
+                        # 8 business days × ~26 candles/day = ~208 candles (accounts for holidays)
+                        start_dt = datetime.combine(today - timedelta(days=8), datetime.min.time())
+                        end_dt = datetime.combine(today, datetime.max.time())
+                        c = _call_historical(kite, instr, start_dt, end_dt, '15minute')
                         intraday_candles = list(c) if c else []
+                        
                         if intraday_candles:
-                            upsert_rows(cur, intraday_candles, s, '15m')
-                            print(f"Upserted {len(intraday_candles)} 15m candles for {s}")
+                            # Take last 200 candles to ensure consistent data across all symbols
+                            final_15m = intraday_candles[-200:]
+                            upsert_rows(cur, final_15m, s, '15m')
+                            total = len(intraday_candles)
+                            used = len(final_15m)
+                            print(f"Upserted {used} 15m candles for {s} (fetched {total}, kept last 200)")
+                        else:
+                            print(f"No 15m candles fetched for {s}")
                     except Exception as e:
                         print(f"Warning: Failed to fetch 15m data for {s}: {e}")
                 
-                # Fetch daily candles: 200 recent candles
+                # Fetch daily candles: 200 recent candles spanning last ~1 year
                 elif kite_tf == 'day' or label == '1d':
                     print(f"Fetching daily candles for {s}")
                     try:
+                        # Fetch last 300 days to ensure we get 200+ complete candles
                         start_dt = today - timedelta(days=300)
                         end_dt = today + timedelta(days=1)
                         c = _call_historical(kite, instr, start_dt, end_dt, 'day')
                         daily_candles = list(c) if c else []
                         if daily_candles:
-                            final = daily_candles[-200:]  # Last 200 candles
+                            # Take last 200 candles for ~1 year of data
+                            final = daily_candles[-200:]
                             upsert_rows(cur, final, s, '1d')
-                            print(f"Upserted {len(final)} daily candles for {s}")
+                            print(f"Upserted {len(final)} daily candles for {s} (last 200 days)")
                     except Exception as e:
                         print(f"Warning: Failed to fetch daily data for {s}: {e}")
         

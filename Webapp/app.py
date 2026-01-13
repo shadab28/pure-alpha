@@ -39,7 +39,6 @@ from ltp_service import get_kite  # type: ignore
 
 app = Flask(__name__, template_folder="templates")
 
-
 # -------- Logging setup (date-wise subfolders) --------
 LOG_BASE_DIR = os.path.join(REPO_ROOT, 'logs')
 os.makedirs(LOG_BASE_DIR, exist_ok=True)
@@ -115,7 +114,6 @@ order_logger = _get_logger('orders', 'orders.log')
 error_logger = _get_logger('errors', 'errors.log')
 trail_logger = _get_logger('trail', 'trailing.log')
 
-
 # -------- In-memory store for orders placed via this webapp --------
 _orders_lock = threading.RLock()
 _orders_store: dict[str, dict] = {}
@@ -126,7 +124,6 @@ _broker_orders_lock = threading.RLock()
 _gtt_cache: dict[str, list] = {}
 _gtt_cache_ts: float = 0.0
 _order_event_queues: list = []
-
 
 def _fetch_gtts_with_timeout(kite, timeout=2.0):
 	"""Attempt to fetch GTTs from kite but return quickly using a thread timeout.
@@ -211,11 +208,9 @@ def _ensure_order_listener():
 	except Exception as e:
 		error_logger.error("Failed to start ticker listener: %s", e)
 
-
 @app.get('/events/orders')
 def sse_orders():
 	"""Server-Sent Events: stream order updates to clients."""
-	access_logger.info("GET /events/orders from %s", request.remote_addr)
 	try:
 		import queue
 		q = queue.Queue(maxsize=1000)
@@ -247,16 +242,13 @@ def sse_orders():
 		error_logger.exception("/events/orders failed: %s", e)
 		return jsonify({"error": str(e)}), 500
 
-
 @app.route("/api/ltp")
 def api_ltp():
 	try:
-		access_logger.info("GET /api/ltp from %s", request.remote_addr)
 		return jsonify(fetch_ltp())
 	except Exception as e:
 		error_logger.exception("/api/ltp failed: %s", e)
 		return jsonify({"error": str(e)}), 500
-
 
 @app.route('/api/ck')
 def api_ck():
@@ -265,7 +257,6 @@ def api_ck():
 	Uses ltp_service.get_ck_data() which will compute/return RSI when available.
 	"""
 	try:
-		access_logger.info("GET /api/ck from %s", request.remote_addr)
 		from ltp_service import get_ck_data  # type: ignore
 		res = get_ck_data()
 		if 'error' in res:
@@ -274,7 +265,6 @@ def api_ck():
 	except Exception as e:
 		error_logger.exception("/api/ck failed: %s", e)
 		return jsonify({"error": str(e)}), 500
-
 
 @app.route('/api/vcp')
 def api_vcp():
@@ -292,7 +282,6 @@ def api_vcp():
 	- volatility_trend: Decreasing or Increasing
 	"""
 	try:
-		access_logger.info("GET /api/vcp from %s", request.remote_addr)
 		from ltp_service import get_vcp_data  # type: ignore
 		res = get_vcp_data()
 		if 'error' in res:
@@ -301,7 +290,6 @@ def api_vcp():
 	except Exception as e:
 		error_logger.exception("/api/vcp failed: %s", e)
 		return jsonify({"error": str(e)}), 500
-
 
 @app.route('/api/refresh/averages', methods=['POST'])
 def api_refresh_averages():
@@ -328,7 +316,6 @@ def api_refresh_averages():
 	except Exception as e:
 		error_logger.exception("/api/refresh/averages failed: %s", e)
 		return jsonify({"status": "error", "error": str(e)}), 500
-
 
 @app.route('/api/user-support', methods=['GET', 'POST'])
 def api_user_support():
@@ -382,7 +369,6 @@ def api_user_support():
 		except Exception as e:
 			error_logger.exception("/api/user-support GET failed: %s", e)
 			return jsonify({})
-
 
 @app.post("/api/major-support")
 @app.get("/api/major-support")
@@ -438,12 +424,10 @@ def api_major_support():
 			error_logger.exception("/api/major-support GET failed: %s", e)
 			return jsonify({})
 
-
 @app.get("/api/orderbook")
 def api_orderbook():
 	"""Return the active/open broker order book directly from Kite."""
 	try:
-		access_logger.info("GET /api/orderbook from %s", request.remote_addr)
 		kite = get_kite()
 		orders = []
 		try:
@@ -458,7 +442,6 @@ def api_orderbook():
 	except Exception as e:
 		error_logger.exception("/api/orderbook failed: %s", e)
 		return jsonify({"error": str(e)}), 500
-
 
 @app.post("/api/gtt/recreate")
 def api_gtt_recreate():
@@ -580,7 +563,6 @@ def api_gtt_recreate():
 		error_logger.exception("/api/gtt/recreate failed: %s", e)
 		return jsonify({"error": str(e)}), 500
 
-
 @app.post("/api/trailing/start")
 def api_start_trailing():
 	"""Start trailing for an existing GTT order that wasn't placed through the webapp."""
@@ -651,12 +633,10 @@ def api_start_trailing():
 		error_logger.exception("/api/trailing/start failed: %s", e)
 		return jsonify({"error": str(e)}), 500
 
-
 @app.get("/api/trades")
 def api_trades():
 	"""Return recent executed trades and current GTT (GTC) orders for reference."""
 	try:
-		access_logger.info("GET /api/trades from %s", request.remote_addr)
 		kite = get_kite()
 		trades = []
 		try:
@@ -695,12 +675,10 @@ def api_trades():
 		error_logger.exception("/api/trades failed: %s", e)
 		return jsonify({"error": str(e)}), 500
 
-
 @app.get("/api/positions")
 def api_positions():
 	"""Return current positions (day and net) from Kite."""
 	try:
-		access_logger.info("GET /api/positions from %s", request.remote_addr)
 		kite = get_kite()
 		pos = {}
 		try:
@@ -713,12 +691,10 @@ def api_positions():
 		error_logger.exception("/api/positions failed: %s", e)
 		return jsonify({"error": str(e)}), 500
 
-
 @app.get("/api/holdings")
 def api_holdings():
 	"""Return current holdings from Kite."""
 	try:
-		access_logger.info("GET /api/holdings from %s", request.remote_addr)
 		kite = get_kite()
 		holdings = []
 		try:
@@ -800,13 +776,10 @@ def api_holdings():
 		error_logger.exception("/api/holdings failed: %s", e)
 		return jsonify({"error": str(e)}), 500
 
-
-
 @app.get("/api/gtt")
 def api_gtt_list():
 		"""Return current GTT (GTC) orders grouped by tradingsymbol."""
 		try:
-			access_logger.info("GET /api/gtt from %s", request.remote_addr)
 			kite = get_kite()
 			gtts = []
 			try:
@@ -839,7 +812,6 @@ def api_gtt_list():
 
 @app.route("/")
 def index():
-	access_logger.info("GET / from %s", request.remote_addr)
 	# Ensure we are listening to order updates
 	try:
 		_ensure_order_listener()
@@ -847,11 +819,9 @@ def index():
 		pass
 	return render_template("index.html")
 
-
 @app.route("/export/ltp.csv")
 def export_ltp_csv():
 	try:
-		access_logger.info("GET /export/ltp.csv from %s", request.remote_addr)
 		data = fetch_ltp()
 		rows = [
 			"symbol,last_price,last_close_15m,sma200_15m,sma50_15m,ratio_15m_50_200,rank_gm,pct_vs_15m_sma200,pct_vs_daily_sma50,drawdown_15m_200_pct,days_since_golden_cross,daily_sma50,daily_sma200,daily_ratio_50_200,volume_ratio_d5_d200"
@@ -867,7 +837,6 @@ def export_ltp_csv():
 	except Exception as e:
 		error_logger.exception("/export/ltp.csv failed: %s", e)
 		return jsonify({"error": str(e)}), 500
-
 
 def _load_tick_sizes(csv_path: str) -> dict:
 	"""Load tick sizes from instruments CSV. Fallback to 0.05 when missing."""
@@ -889,7 +858,6 @@ def _load_tick_sizes(csv_path: str) -> dict:
 		pass
 	return result
 
-
 def _round_to_tick(price: float, tick: float) -> float:
 	if not tick:
 		tick = 0.05
@@ -907,7 +875,6 @@ def _fallback_tick_by_price(ltp: float) -> float:
 		return 0.1 if ltp < 100 else 0.5
 	except Exception:
 		return 0.1
-
 
 def _place_sl_gtt(kite, symbol: str, qty: int, ref_price: float, sl_pct: float = 0.05):
 	"""Place a single-leg GTT stop-loss (sell) at sl_pct below reference price.
@@ -983,7 +950,6 @@ def _place_bracket_oco_gtt(kite, symbol: str, qty: int, ref_price: float, target
 		]
 	)
 	return resp.get('trigger_id') or resp.get('id')
-
 
 # ---------- Trailing GTT manager (best-effort client-side) ---------- 
 # Now keyed by gtt_id to support multiple GTTs per symbol
@@ -1153,7 +1119,6 @@ def _ensure_trailer_thread(kite):
 
 	threading.Thread(target=worker, name="gtt_trailer", daemon=True).start()
 
-
 def _start_trailing(kite, symbol: str, qty: int, sl_pct: float, ltp: float, tick: float, gtt_id: str|None, gtt_type: str = 'oco', target_pct: float = 0.075, initial_trigger: float|None = None):
 	if not gtt_id:
 		trail_logger.warning("Cannot start trailing without gtt_id for %s", symbol)
@@ -1178,7 +1143,6 @@ def _start_trailing(kite, symbol: str, qty: int, sl_pct: float, ltp: float, tick
 		})
 		_trail_state[str(gtt_id)] = state
 	_ensure_trailer_thread(kite)
-
 
 # Helper function to log trade entries to the database
 def _log_trade_entry(symbol, qty, entry_price, order_id, gtt_id):
@@ -1229,7 +1193,6 @@ def _log_trade_entry(symbol, qty, entry_price, order_id, gtt_id):
 		order_logger.error("Failed to log trade entry: %s", e)
 		raise
 
-
 def _log_trade_exit(order_id, symbol, exit_price, exit_qty, exit_type='completed'):
 	"""Automatically log a trade exit when order is completed or GTT triggered."""
 	from datetime import datetime
@@ -1252,6 +1215,11 @@ def _log_trade_exit(order_id, symbol, exit_price, exit_qty, exit_type='completed
 				return
 			
 			entry_id, entry_price, entry_qty, entry_date = entry_record
+			
+			# Ensure all values are float for arithmetic
+			entry_price = float(entry_price)
+			exit_price = float(exit_price)
+			exit_qty = int(exit_qty)
 			
 			# Calculate PnL
 			pnl = (exit_price - entry_price) * exit_qty
@@ -1282,7 +1250,6 @@ def _log_trade_exit(order_id, symbol, exit_price, exit_qty, exit_type='completed
 	except Exception as e:
 		order_logger.error("Failed to log trade exit: %s", e)
 		# Don't raise - exit logging should not block main flow
-
 
 @app.post("/api/order/buy")
 def api_place_buy():
@@ -1476,7 +1443,6 @@ def api_place_buy():
 def api_orders():
 	"""Return orders placed via this app with live LTP, trailing stop, and PnL."""
 	try:
-		access_logger.info("GET /api/orders from %s", request.remote_addr)
 		with _orders_lock:
 			items = list(_orders_store.items())
 		if not items:
@@ -1713,7 +1679,6 @@ def api_orders():
 		error_logger.exception("/api/orders failed: %s", e)
 		return jsonify({"error": str(e)}), 500
 
-
 @app.post('/api/order/cancel')
 def api_cancel_order():
 	"""Cancel a broker order by order_id (JSON body: {"order_id": "...", "symbol": "..."})."""
@@ -1783,7 +1748,6 @@ def api_cancel_order():
 		error_logger.exception("/api/order/cancel failed: %s", e)
 		return jsonify({"error": str(e)}), 500
 
-
 @app.post('/api/gtt/cancel')
 def api_cancel_gtt():
 	"""Cancel/delete a GTT by trigger id (JSON body: {"gtt_id": "..."})."""
@@ -1821,7 +1785,6 @@ def api_cancel_gtt():
 	except Exception as e:
 		error_logger.exception("/api/gtt/cancel failed: %s", e)
 		return jsonify({"error": str(e)}), 500
-
 
 @app.post('/api/gtt/book')
 def api_book_gtt():
@@ -1897,7 +1860,6 @@ def api_book_gtt():
 	except Exception as e:
 		order_logger.exception("/api/gtt/book failed: %s", e)
 		return jsonify({"error": str(e)}), 500
-
 
 @app.route('/api/trade-journal', methods=['GET', 'POST', 'PUT'])
 def api_trade_journal():
@@ -2037,7 +1999,6 @@ def api_trade_journal():
 		error_logger.exception("/api/trade-journal failed: %s", e)
 		return jsonify({"error": str(e)}), 500
 
-
 @app.post('/api/trade-journal/log-exit')
 def api_log_trade_exit():
 	"""Manually log a trade exit (called when order is completed/GTT triggered)."""
@@ -2058,7 +2019,6 @@ def api_log_trade_exit():
 	except Exception as e:
 		order_logger.error("Failed to log exit via API: %s", e)
 		return jsonify({"error": str(e)}), 500
-
 
 @app.route('/api/trade-journal/sync-exits', methods=['POST'])
 def api_sync_trade_exits():
@@ -2125,7 +2085,6 @@ def api_sync_trade_exits():
 		order_logger.error("Failed to sync exits: %s", e)
 		return jsonify({"error": str(e)}), 500
 
-
 @app.route('/api/trade-journal/stats', methods=['GET'])
 def api_trade_journal_stats():
 	"""Get trade journal statistics (win rate, avg PnL, etc)."""
@@ -2188,7 +2147,6 @@ def api_trade_journal_stats():
 	except Exception as e:
 		error_logger.exception("/api/trade-journal/stats failed: %s", e)
 		return jsonify({"error": str(e)}), 500
-
 
 # --------- DEBUG ENDPOINTS FOR TROUBLESHOOTING MISSING DATA ---------
 
@@ -2268,7 +2226,6 @@ def debug_missing_data():
 		error_logger.exception("debug_missing_data failed: %s", e)
 		return jsonify({"error": str(e), "type": type(e).__name__}), 500
 
-
 @app.route('/api/debug/cache-status', methods=['GET'])
 def debug_cache_status():
 	"""Show cache population status and sizes."""
@@ -2347,7 +2304,6 @@ def debug_cache_status():
 		error_logger.exception("debug_cache_status failed: %s", e)
 		return jsonify({"error": str(e), "type": type(e).__name__}), 500
 
-
 # -------- Momentum Strategy Integration --------
 try:
 	from momentum_strategy import register_strategy_routes
@@ -2357,7 +2313,6 @@ except ImportError as e:
 	logging.warning(f"Could not import momentum_strategy: {e}")
 except Exception as e:
 	logging.warning(f"Failed to register momentum strategy routes: {e}")
-
 
 if __name__ == "__main__":
 	# Use 5050 default to avoid macOS AirPlay occupying 5000

@@ -331,7 +331,10 @@ def run_scanners_periodic(interval_seconds: int = 300):
 def run_flask_server(host: str, port: int):
     """Run Flask in a background thread."""
     def worker():
-        # Disable Flask's reloader in threaded mode
+        # Disable Flask's reloader and werkzeug logging in threaded mode
+        import logging as flask_logging
+        flask_logging.getLogger('werkzeug').setLevel(flask_logging.ERROR)
+        flask_logging.getLogger('flask').setLevel(flask_logging.ERROR)
         app.run(host=host, port=port, debug=False, use_reloader=False, threaded=True)
     
     thread = threading.Thread(target=worker, name="flask_server", daemon=True)
@@ -368,6 +371,10 @@ def run(
         format='%(asctime)s [%(levelname)s] %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S'
     )
+    
+    # Suppress verbose library logs
+    logging.getLogger('urllib3').setLevel(logging.WARNING)
+    logging.getLogger('kiteconnect').setLevel(logging.WARNING)
     
     logging.info("=" * 60)
     logging.info("Pure Alpha Trading Webapp - Starting...")

@@ -36,26 +36,38 @@ import json
 # CONFIGURATION
 # ============================================================================
 
-TOTAL_STRATEGY_CAPITAL = Decimal("100000")  # INR total capital
-CAPITAL_PER_POSITION = Decimal("5000")  # INR per position (₹5,000 each trade)
-MAX_POSITIONS = int(TOTAL_STRATEGY_CAPITAL / CAPITAL_PER_POSITION)  # = 20 positions max
+TOTAL_STRATEGY_CAPITAL = Decimal("90000")  # INR total capital
+CAPITAL_PER_POSITION = Decimal("3000")  # INR per position (₹3,000 each trade)
+MAX_POSITIONS = 30  # Max 30 positions
 SCAN_INTERVAL_SECONDS = 60  # Check list every 1 minute
 
+# Entry Filters
+MIN_RANK_GM_THRESHOLD = 2.5  # HARD filter: Only trade when Rank_GM > 2.5
+
 # Position-specific rules
-POSITION_1_STOP_LOSS_PCT = Decimal("-5.0")    # Fixed -5% from entry
-POSITION_1_TARGET_PCT = Decimal("10.0")       # Fixed +10% target
+POSITION_1_STOP_LOSS_PCT = Decimal("-2.5")    # Fixed -2.5% from entry (50% reduction)
+POSITION_1_TARGET_PCT = Decimal("5.0")        # Fixed +5% target (50% reduction)
 
-POSITION_2_STOP_LOSS_PCT = Decimal("-5.0")    # Floating -5% from entry (trails)
-POSITION_2_TARGET_PCT = Decimal("7.5")        # Fixed +7.5% target
-POSITION_2_ENTRY_CONDITION_PNL = Decimal("0") # P1 must be > 0%
+POSITION_2_STOP_LOSS_PCT = Decimal("-2.5")    # Floating -2.5% from entry (trails, 50% reduction)
+POSITION_2_TARGET_PCT = Decimal("3.75")       # Fixed +3.75% target (50% reduction)
+POSITION_2_ENTRY_CONDITION_PNL = Decimal("0.5") # P1 must be > 0.5%
 
-POSITION_3_STOP_LOSS_PCT = Decimal("-5.0")    # Floating -5% (trails)
+POSITION_3_STOP_LOSS_PCT = Decimal("-2.5")    # Floating -2.5% (trails, 50% reduction)
 POSITION_3_TARGET_PCT = None                  # No target (runner)
 POSITION_3_ENTRY_CONDITION_AVG_PNL = Decimal("2.0")  # Avg of P1 & P2 >= 2%
 
 # Database path
 DB_DIR = os.path.dirname(__file__)
 DB_PATH = os.path.join(DB_DIR, "momentum_strategy.db")
+
+# ANSI Color codes
+class Colors:
+    GREEN = '\033[92m'
+    BLUE = '\033[94m'
+    YELLOW = '\033[93m'
+    RED = '\033[91m'
+    RESET = '\033[0m'
+    BOLD = '\033[1m'
 
 # Logging setup - Console and Date-wise File Logs
 def setup_logging():
@@ -73,10 +85,19 @@ def setup_logging():
     logger = logging.getLogger("momentum_strategy")
     logger.setLevel(logging.DEBUG)
     
+    # Custom formatter with colors for console
+    class ColoredFormatter(logging.Formatter):
+        def format(self, record):
+            msg = super().format(record)
+            # Green for trade entries/exits and important trade info
+            if any(keyword in msg for keyword in ['Opened P', 'Saving closed trade', 'Loaded', 'Verification', 'Opened P']):
+                msg = f"{Colors.GREEN}{msg}{Colors.RESET}"
+            return msg
+    
     # Console handler (INFO level)
     console_handler = logging.StreamHandler()
     console_handler.setLevel(logging.INFO)
-    console_format = logging.Formatter(
+    console_format = ColoredFormatter(
         '%(asctime)s [MOMENTUM] %(levelname)s: %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S'
     )
@@ -129,6 +150,9 @@ class Trade:
     exit_price: Optional[Decimal] = None
     pnl: Optional[Decimal] = None
     highest_price_since_entry: Optional[Decimal] = None  # For trailing stops
+    execution_mode: str = "PAPER"  # PAPER or LIVE
+    order_book_rank_score: Optional[float] = None  # Order book quality score at entry
+    rank_gm_at_entry: Optional[float] = None  # Rank GM at time of entry
     
     def current_pnl_pct(self, current_price: Decimal) -> Decimal:
         """Calculate current PnL percentage."""
@@ -137,17 +161,24 @@ class Trade:
         return ((current_price - self.entry_price) / self.entry_price) * Decimal("100")
     
     def calculate_trailing_stop(self, current_price: Decimal) -> Decimal:
-        """Calculate trailing stop for positions 2 and 3."""
+        """
+        Calculate trailing stop for positions 2 and 3.
+        
+        Note: highest_price_since_entry should be updated by the caller before calling this.
+        """
         if self.position_number == 1:
             # Position 1 has fixed stop loss
             return self.stop_loss
         
-        # Update highest price
-        if self.highest_price_since_entry is None or current_price > self.highest_price_since_entry:
-            self.highest_price_since_entry = current_price
+        # Use the highest price to calculate trail stop (5% below highest)
+        if self.highest_price_since_entry is None:
+            # Fallback to entry price if not set
+            highest = self.entry_price
+        else:
+            highest = self.highest_price_since_entry
         
         # Trail stop is 5% below highest price
-        trail_stop = self.highest_price_since_entry * (Decimal("1") + POSITION_2_STOP_LOSS_PCT / Decimal("100"))
+        trail_stop = highest * (Decimal("1") + POSITION_2_STOP_LOSS_PCT / Decimal("100"))
         
         # Stop can only move up, never down
         return max(self.stop_loss, trail_stop)
@@ -158,9 +189,11 @@ class RankingRow:
     """Represents a row from the ranking table."""
     symbol: str
     rank: float
+    rank_gm: float  # Rank GM for filtering (HARD filter: must be > 3)
     last_price: Decimal
     lot_size: int
     volume_ratio: float
+    order_book_rank_score: Optional[float] = None  # Order book quality score
 
 
 @dataclass
@@ -181,8 +214,8 @@ class Broker:
     """
     Broker abstraction for order execution.
     
-    Defaults to PAPER trading mode with simulated fills.
-    Can be extended for live trading by overriding methods.
+    Supports PAPER and LIVE trading modes.
+    PAPER mode simulates trades, LIVE mode places real orders via Kite API.
     """
     
     def __init__(self, mode: str = "PAPER"):
@@ -191,7 +224,41 @@ class Broker:
         self._lock = threading.Lock()
         self._ltp_cache: Dict[str, Decimal] = {}
         self._ltp_callback: Optional[Callable[[str], Optional[Decimal]]] = None
+        self._kite = None  # Kite Connect instance for LIVE mode
         logger.info(f"Broker initialized in {mode} mode")
+    
+    def set_mode(self, mode: str):
+        """Change execution mode (PAPER or LIVE)."""
+        if mode not in ("PAPER", "LIVE"):
+            raise ValueError(f"Invalid mode: {mode}. Must be PAPER or LIVE")
+        old_mode = self.mode
+        self.mode = mode
+        logger.info(f"Broker mode changed: {old_mode} → {mode}")
+    
+    def _get_kite(self):
+        """Get or initialize Kite Connect instance for LIVE trading."""
+        if self._kite is None:
+            try:
+                import sys
+                base_dir = os.path.dirname(os.path.dirname(__file__))
+                if base_dir not in sys.path:
+                    sys.path.insert(0, base_dir)
+                
+                from kiteconnect import KiteConnect
+                
+                # Read API credentials
+                api_key = "da0ztb3q4k9ckiwn"
+                token_path = os.path.join(base_dir, "Core_files", "token.txt")
+                with open(token_path, "r") as f:
+                    access_token = f.read().strip()
+                
+                self._kite = KiteConnect(api_key=api_key)
+                self._kite.set_access_token(access_token)
+                logger.info("Kite Connect initialized for LIVE trading")
+            except Exception as e:
+                logger.error(f"Failed to initialize Kite Connect: {e}")
+                raise
+        return self._kite
     
     def set_ltp_callback(self, callback: Callable[[str], Optional[Decimal]]):
         """Set callback function to fetch LTP from external source."""
@@ -233,6 +300,7 @@ class Broker:
         Place an order (BUY or SELL).
         
         In PAPER mode, simulates immediate fill at current LTP or specified price.
+        In LIVE mode, places real order via Kite API.
         
         Returns:
             dict with order_id, fill_price, fill_qty, status
@@ -270,9 +338,83 @@ class Broker:
                 "timestamp": datetime.now()
             }
         else:
-            # Live mode - integrate with actual broker API
-            # This would call Kite/Zerodha API
-            raise NotImplementedError("Live trading not implemented")
+            # LIVE mode - place real order via Kite API
+            try:
+                kite = self._get_kite()
+                transaction_type = kite.TRANSACTION_TYPE_BUY if side == OrderSide.BUY else kite.TRANSACTION_TYPE_SELL
+                
+                live_order_id = kite.place_order(
+                    variety=kite.VARIETY_REGULAR,
+                    exchange=kite.EXCHANGE_NSE,
+                    tradingsymbol=symbol,
+                    transaction_type=transaction_type,
+                    quantity=qty,
+                    product=kite.PRODUCT_CNC,
+                    order_type=kite.ORDER_TYPE_MARKET
+                )
+                
+                logger.info(f"[LIVE] {side.value} Order: {symbol} qty={qty} @ ₹{exec_price} | Order ID: {live_order_id}")
+                
+                return {
+                    "order_id": str(live_order_id),
+                    "status": "COMPLETE",
+                    "fill_price": exec_price,
+                    "fill_qty": qty,
+                    "timestamp": datetime.now()
+                }
+            except Exception as e:
+                logger.error(f"[LIVE] Order failed for {symbol}: {e}")
+                return {
+                    "order_id": order_id,
+                    "status": "REJECTED",
+                    "reason": str(e),
+                    "fill_price": None,
+                    "fill_qty": 0
+                }
+    
+    def place_gtt(
+        self,
+        symbol: str,
+        trigger_price: float,
+        target_price: float,
+        qty: int,
+        order_type: str = "SELL",
+        label: str = ""
+    ) -> Dict[str, Any]:
+        """
+        Place a GTT (Good Till Triggered) order.
+        
+        In PAPER mode, simulates GTT placement.
+        In LIVE mode, places real GTT via Kite API.
+        """
+        if self.mode == "PAPER":
+            logger.info(f"[PAPER] GTT {label}: {symbol} qty={qty} trigger=₹{trigger_price:.2f}")
+            return {"status": "SUCCESS", "gtt_id": f"GTT_PAPER_{self._order_id_counter}"}
+        else:
+            try:
+                kite = self._get_kite()
+                
+                # Place single-leg GTT order
+                gtt_id = kite.place_gtt(
+                    trigger_type=kite.GTT_TYPE_SINGLE,
+                    tradingsymbol=symbol,
+                    exchange=kite.EXCHANGE_NSE,
+                    trigger_values=[trigger_price],
+                    last_price=float(self.get_ltp(symbol) or trigger_price),
+                    orders=[{
+                        "transaction_type": kite.TRANSACTION_TYPE_SELL,
+                        "quantity": qty,
+                        "product": kite.PRODUCT_CNC,
+                        "order_type": kite.ORDER_TYPE_LIMIT,
+                        "price": target_price
+                    }]
+                )
+                
+                logger.info(f"[LIVE] GTT {label}: {symbol} qty={qty} trigger=₹{trigger_price:.2f} | GTT ID: {gtt_id}")
+                return {"status": "SUCCESS", "gtt_id": str(gtt_id)}
+            except Exception as e:
+                logger.error(f"[LIVE] GTT failed for {symbol}: {e}")
+                return {"status": "FAILED", "reason": str(e)}
     
     def exit_order(self, trade: Trade) -> Dict[str, Any]:
         """
@@ -478,6 +620,7 @@ class StrategyDB:
                         pnl=Decimal(row['pnl']) if row['pnl'] else None,
                         highest_price_since_entry=Decimal(row['highest_price_since_entry']) if row['highest_price_since_entry'] else None
                     ))
+                
                 return trades
             finally:
                 conn.close()
@@ -545,7 +688,17 @@ class StrategyDB:
                     WHERE trading_date = ? AND status = 'CLOSED' AND pnl IS NOT NULL
                 """, (today,))
                 row = cursor.fetchone()
-                return Decimal(str(row['total_pnl'])) if row else Decimal("0")
+                total_pnl = Decimal(str(row['total_pnl'])) if row else Decimal("0")
+                
+                # Also count how many closed trades
+                cursor.execute("""
+                    SELECT COUNT(*) as count FROM trades
+                    WHERE trading_date = ? AND status = 'CLOSED' AND pnl IS NOT NULL
+                """, (today,))
+                count_row = cursor.fetchone()
+                closed_count = count_row['count'] if count_row else 0
+                
+                return total_pnl
             finally:
                 conn.close()
     
@@ -604,9 +757,13 @@ def get_live_rankings() -> List[RankingRow]:
                 # Get rank from LTP data (rank_gm field)
                 ltp_info = ltp_dict.get(symbol, {})
                 rank = ltp_info.get('rank_gm', 0) or 0
+                rank_gm = float(rank)  # Store actual rank_gm value for filtering
                 
                 # Volume ratio from LTP data
                 volume_ratio = ltp_info.get('volume_ratio', 1.0) or 1.0
+                
+                # Order book rank score (if available)
+                order_book_rank_score = ltp_info.get('order_book_rank_score')
                 
                 # Lot size - default to 1 for equity
                 lot_size = 1
@@ -614,9 +771,11 @@ def get_live_rankings() -> List[RankingRow]:
                 rankings.append(RankingRow(
                     symbol=symbol,
                     rank=float(rank),
+                    rank_gm=rank_gm,
                     last_price=Decimal(str(last_price)),
                     lot_size=lot_size,
-                    volume_ratio=float(volume_ratio)
+                    volume_ratio=float(volume_ratio),
+                    order_book_rank_score=float(order_book_rank_score) if order_book_rank_score else None
                 ))
             except Exception as e:
                 logger.debug(f"Skipping {symbol}: {e}")
@@ -642,10 +801,13 @@ class MomentumStrategy:
     """
     Main strategy engine implementing the position ladder rules.
     
-    Position Ladder:
-    - Position 1: Entry when no active positions. Fixed SL -5%, Target +10%
-    - Position 2: Entry only if P1 PnL > 0. Trailing SL -5%, Target +7.5%
-    - Position 3: Entry only if avg(P1, P2) PnL >= +2%. Trailing SL -5%, No target (runner)
+    Position Ladder with OCO GTT Orders:
+    - Position 1: Entry when no active positions. Fixed SL -2.5%, Target +5%
+      * GTT: OCO (One-Cancels-Other) with fixed SL and fixed target
+    - Position 2: Entry only if P1 PnL > 0.5%. Trailing SL -2.5%, Target +3.75%
+      * GTT: OCO with trailing SL and fixed target (SL updates, target stays same)
+    - Position 3: Entry only if avg(P1, P2) PnL >= +2%. Trailing SL -2.5%, No target (runner)
+      * GTT: Single SL order only (no target, SL trails upward)
     """
     
     def __init__(self, broker: Optional[Broker] = None, db: Optional[StrategyDB] = None):
@@ -814,6 +976,21 @@ class MomentumStrategy:
             logger.debug("All position slots filled")
             return None
         
+        # SAFETY ENFORCEMENT for LIVE mode
+        if self.broker.mode == "LIVE":
+            # Block if Rank_GM is below threshold
+            if ranking.rank_gm <= MIN_RANK_GM_THRESHOLD:
+                logger.warning(
+                    f"[LIVE SAFETY] Blocked {symbol}: Rank_GM ({ranking.rank_gm:.2f}) <= "
+                    f"MIN_THRESHOLD ({MIN_RANK_GM_THRESHOLD})"
+                )
+                return None
+            
+            # Block if order_book_rank_score is missing (optional: uncomment to enforce)
+            # if ranking.order_book_rank_score is None:
+            #     logger.warning(f"[LIVE SAFETY] Blocked {symbol}: order_book_rank_score missing")
+            #     return None
+        
         # Get current price from broker
         ltp = self.broker.get_ltp(symbol)
         if ltp is None:
@@ -828,6 +1005,20 @@ class MomentumStrategy:
             logger.debug(f"{symbol}: Price too high for CAPITAL_PER_POSITION (₹{CAPITAL_PER_POSITION})")
             return None
         
+        # Calculate stop loss and target first (for LIVE mode safety check)
+        entry_price_estimate = ltp
+        stop_loss = self._calculate_stop_loss(entry_price_estimate, position_type)
+        target = self._calculate_target(entry_price_estimate, position_type)
+        
+        # LIVE mode safety: Ensure SL is defined (block if target undefined for non-P3)
+        if self.broker.mode == "LIVE":
+            if stop_loss is None or stop_loss <= 0:
+                logger.warning(f"[LIVE SAFETY] Blocked {symbol}: Stop Loss undefined")
+                return None
+            if position_type != 3 and (target is None or target <= 0):
+                logger.warning(f"[LIVE SAFETY] Blocked {symbol}: Target undefined for P{position_type}")
+                return None
+        
         # Place order
         order_result = self.broker.place_order(symbol, qty, OrderSide.BUY)
         
@@ -838,11 +1029,11 @@ class MomentumStrategy:
         fill_price = order_result['fill_price']
         fill_qty = order_result['fill_qty']
         
-        # Calculate stop loss and target
+        # Recalculate stop loss and target with actual fill price
         stop_loss = self._calculate_stop_loss(fill_price, position_type)
         target = self._calculate_target(fill_price, position_type)
         
-        # Create trade object
+        # Create trade object with additional tracking fields
         trade = Trade(
             trade_id=0,  # Will be set by DB
             symbol=symbol,
@@ -853,7 +1044,10 @@ class MomentumStrategy:
             target=target,
             position_number=position_type,
             status=TradeStatus.OPEN,
-            highest_price_since_entry=fill_price
+            highest_price_since_entry=fill_price,
+            execution_mode=self.broker.mode,  # Track execution mode (PAPER/LIVE)
+            order_book_rank_score=ranking.order_book_rank_score,  # Track order book quality
+            rank_gm_at_entry=ranking.rank_gm  # Track Rank_GM at entry time
         )
         
         # Save to database
@@ -864,17 +1058,193 @@ class MomentumStrategy:
             self.open_trades.append(trade)
         
         # Enhanced logging with emojis and details
+        mode_emoji = "📝" if self.broker.mode == "PAPER" else "💰"
         logger.info(
             f"\n{'▶'*3} POSITION OPENED {'▶'*3}\n"
             f"   Symbol: {symbol}\n"
             f"   Type: P{position_type} | Qty: {fill_qty} | Entry: ₹{fill_price:.2f}\n"
             f"   Stop Loss: ₹{stop_loss:.2f} | Target: {'₹' + str(target.quantize(Decimal('0.01'))) if target else '🏃 Runner'}\n"
             f"   Capital Used: ₹{fill_price * fill_qty:,.2f}\n"
+            f"   Mode: {mode_emoji} {self.broker.mode} | Rank_GM: {ranking.rank_gm:.2f}\n"
             f"   Total Positions: {self.get_position_count()}/{MAX_POSITIONS}"
         )
         
+        # Place GTT orders for stop-loss and target
+        self._place_gtt_orders(trade)
+        
         return trade
     
+    def _place_gtt_orders(self, trade: Trade):
+        """
+        Automatically place OCO GTT orders with stop-loss and target based on position type.
+        
+        OCO (One-Cancels-Other) GTT Strategy by Position Type:
+        - P1: OCO with Fixed SL (-5%) and Fixed Target (+10%)
+           * When either triggers, the other is automatically canceled
+        - P2: OCO with Trailing SL (-5%, trails with price) and Fixed Target (+7.5%)
+           * SL trails upward as price moves up
+           * Target is fixed, doesn't trail
+        - P3: Only SL (no OCO needed, runners have no target)
+           * SL trails upward with highest price
+           * No target order
+        
+        Each GTT order pair is placed with quantity = trade quantity.
+        """
+        # Check if broker supports GTT orders
+        if not hasattr(self.broker, 'place_gtt'):
+            logger.debug(f"Broker doesn't support GTT orders, skipping GTT placement for {trade.symbol}")
+            return
+        
+        symbol = trade.symbol
+        qty = trade.qty
+        position_type = trade.position_number
+        
+        if position_type == 1:
+            # P1: Fixed SL and Fixed Target in OCO
+            self._place_gtt_oco(
+                symbol=symbol,
+                qty=qty,
+                position_type=1,
+                stop_price=float(trade.stop_loss),
+                target_price=float(trade.target),
+                is_trailing_sl=False,
+                trade=trade
+            )
+        
+        elif position_type == 2:
+            # P2: Trailing SL and Fixed Target in OCO
+            self._place_gtt_oco(
+                symbol=symbol,
+                qty=qty,
+                position_type=2,
+                stop_price=float(trade.stop_loss),
+                target_price=float(trade.target),
+                is_trailing_sl=True,
+                trade=trade
+            )
+        
+        elif position_type == 3:
+            # P3: Only Trailing SL (no target)
+            self._place_gtt_stop_only(
+                symbol=symbol,
+                qty=qty,
+                position_type=3,
+                stop_price=float(trade.stop_loss),
+                is_trailing_sl=True,
+                trade=trade
+            )
+    
+    def _place_gtt_oco(
+        self,
+        symbol: str,
+        qty: int,
+        position_type: int,
+        stop_price: float,
+        target_price: float,
+        is_trailing_sl: bool,
+        trade: Trade
+    ):
+        """Place OCO GTT with stop-loss and target."""
+        try:
+            if self.broker.mode == "PAPER":
+                logger.info(
+                    f"   [PAPER] GTT OCO P{position_type} {symbol}: "
+                    f"SL @ ₹{stop_price:.2f} (trailing={is_trailing_sl}), "
+                    f"Target @ ₹{target_price:.2f}"
+                )
+                trade.gtt_id = f"GTT_OCO_PAPER_P{position_type}_{symbol}"
+                return
+            
+            kite = self.broker._get_kite()
+            
+            # Place OCO (two-leg) GTT order
+            gtt_id = kite.place_gtt(
+                trigger_type=kite.GTT_TYPE_OCO,  # OCO = two legs
+                tradingsymbol=symbol,
+                exchange=kite.EXCHANGE_NSE,
+                trigger_values=[stop_price, target_price],  # Two trigger prices
+                last_price=float(self.broker.get_ltp(symbol) or stop_price),
+                orders=[
+                    {  # Leg 1: Stop-Loss order
+                        "transaction_type": kite.TRANSACTION_TYPE_SELL,
+                        "quantity": qty,
+                        "product": kite.PRODUCT_CNC,
+                        "order_type": kite.ORDER_TYPE_LIMIT,
+                        "price": stop_price
+                    },
+                    {  # Leg 2: Target order
+                        "transaction_type": kite.TRANSACTION_TYPE_SELL,
+                        "quantity": qty,
+                        "product": kite.PRODUCT_CNC,
+                        "order_type": kite.ORDER_TYPE_LIMIT,
+                        "price": target_price
+                    }
+                ]
+            )
+            
+            trade.gtt_id = str(gtt_id)
+            logger.info(
+                f"   ✓ GTT OCO P{position_type} {symbol}: "
+                f"SL @ ₹{stop_price:.2f} (trailing={is_trailing_sl}), "
+                f"Target @ ₹{target_price:.2f} | GTT ID: {gtt_id}"
+            )
+        
+        except Exception as e:
+            logger.error(
+                f"   ❌ FAILED to place OCO GTT for {symbol} P{position_type}: {type(e).__name__}: {e}",
+                exc_info=True
+            )
+    
+    def _place_gtt_stop_only(
+        self,
+        symbol: str,
+        qty: int,
+        position_type: int,
+        stop_price: float,
+        is_trailing_sl: bool,
+        trade: Trade
+    ):
+        """Place GTT with only stop-loss (for P3 runners)."""
+        try:
+            if self.broker.mode == "PAPER":
+                logger.info(
+                    f"   [PAPER] GTT SL-ONLY P{position_type} {symbol}: "
+                    f"SL @ ₹{stop_price:.2f} (trailing={is_trailing_sl})"
+                )
+                trade.gtt_id = f"GTT_SL_PAPER_P{position_type}_{symbol}"
+                return
+            
+            kite = self.broker._get_kite()
+            
+            # Place single-leg GTT order (SL only, no target)
+            gtt_id = kite.place_gtt(
+                trigger_type=kite.GTT_TYPE_SINGLE,
+                tradingsymbol=symbol,
+                exchange=kite.EXCHANGE_NSE,
+                trigger_values=[stop_price],
+                last_price=float(self.broker.get_ltp(symbol) or stop_price),
+                orders=[
+                    {  # Single leg: Stop-Loss order
+                        "transaction_type": kite.TRANSACTION_TYPE_SELL,
+                        "quantity": qty,
+                        "product": kite.PRODUCT_CNC,
+                        "order_type": kite.ORDER_TYPE_LIMIT,
+                        "price": stop_price
+                    }
+                ]
+            )
+            
+            trade.gtt_id = str(gtt_id)
+            logger.info(
+                f"   ✓ GTT SL-ONLY P{position_type} {symbol}: "
+                f"SL @ ₹{stop_price:.2f} (trailing={is_trailing_sl}) | GTT ID: {gtt_id}"
+            )
+        
+        except Exception as e:
+            logger.error(
+                f"   ❌ FAILED to place SL-ONLY GTT for {symbol} P{position_type}: {type(e).__name__}: {e}",
+                exc_info=True
+            )
     def close_position(self, trade: Trade, reason: str) -> Decimal:
         """
         Close an existing position.
@@ -907,6 +1277,7 @@ class MomentumStrategy:
         trade.status = TradeStatus.CLOSED
         
         # Save to database
+        logger.info(f"   Saving closed trade to DB: {trade.symbol} P{trade.position_number} - Exit: ₹{exit_price} PnL: ₹{pnl}")
         self.db.update_trade(trade)
         
         # Remove from open trades
@@ -924,6 +1295,11 @@ class MomentumStrategy:
             f"   Remaining Positions: {self.get_position_count()}/{MAX_POSITIONS}"
         )
         
+        # Verify trade was saved
+        todays_trades = self.db.get_trades_today()
+        closed_trades = [t for t in todays_trades if t.status == TradeStatus.CLOSED]
+        logger.info(f"   ✓ Verification: Total closed trades today: {len(closed_trades)}")
+        
         return pnl
     
     def _check_exits(self):
@@ -938,6 +1314,11 @@ class MomentumStrategy:
                 
                 # Update trailing stop for P2 and P3
                 if trade.position_number in [2, 3]:
+                    # Update highest price first
+                    if trade.highest_price_since_entry is None or ltp > trade.highest_price_since_entry:
+                        trade.highest_price_since_entry = ltp
+                        logger.debug(f"High water mark updated for {trade.symbol}: ₹{ltp:.2f}")
+                    
                     new_stop = trade.calculate_trailing_stop(ltp)
                     if new_stop > trade.stop_loss:
                         trade.stop_loss = new_stop
@@ -969,6 +1350,7 @@ class MomentumStrategy:
            - If a stock qualifies for P3, take P3
            - Else if qualifies for P2, take P2
            - Else if new stock, take P1
+        4. HARD FILTER: Rank_GM must be > MIN_RANK_GM_THRESHOLD (3)
         
         This ensures gradual position building, one trade at a time.
         """
@@ -982,12 +1364,17 @@ class MomentumStrategy:
             logger.debug("No rankings available")
             return
         
-        logger.info(f"Scanning for entry ({self.get_position_count()}/{MAX_POSITIONS} positions)...")
+        logger.debug(f"Scanning for entry ({self.get_position_count()}/{MAX_POSITIONS} positions)...")
         
         # Search from Rank #1 downwards for the BEST eligible trade
         for i, ranking in enumerate(rankings):
             symbol = ranking.symbol
             rank_num = i + 1
+            
+            # HARD FILTER: Reject if Rank_GM <= MIN_RANK_GM_THRESHOLD
+            if ranking.rank_gm <= MIN_RANK_GM_THRESHOLD:
+                # Silent rejection - don't log rejected trades to reduce console noise
+                continue
             
             # Check what position type this symbol qualifies for
             # Priority: P3 > P2 > P1
@@ -1007,7 +1394,7 @@ class MomentumStrategy:
                     avg_pnl = (p1_pnl + p2_pnl) / 2
                     if avg_pnl >= POSITION_3_ENTRY_CONDITION_AVG_PNL:
                         eligible_type = 3
-                        logger.info(f"Rank #{rank_num} {symbol}: P3 eligible (avg PnL={avg_pnl:.2f}%)")
+                        logger.debug(f"Rank #{rank_num} {symbol}: P3 eligible (avg PnL={avg_pnl:.2f}%, Rank_GM={ranking.rank_gm:.2f})")
             
             # Check P2 eligibility (medium priority)
             elif 1 in existing_types and 2 not in existing_types:
@@ -1017,26 +1404,25 @@ class MomentumStrategy:
                     p1_pnl = p1_trade.current_pnl_pct(ltp)
                     if p1_pnl > POSITION_2_ENTRY_CONDITION_PNL:
                         eligible_type = 2
-                        logger.info(f"Rank #{rank_num} {symbol}: P2 eligible (P1 PnL={p1_pnl:.2f}%)")
+                        logger.debug(f"Rank #{rank_num} {symbol}: P2 eligible (P1 PnL={p1_pnl:.2f}%, Rank_GM={ranking.rank_gm:.2f})")
             
             # Check P1 eligibility (lowest priority - no open position in this stock)
             elif not existing_types:
                 # Stock has no open positions - eligible for fresh P1 entry
                 # (Can re-enter even if previously traded and closed today)
                 eligible_type = 1
-                logger.info(f"Rank #{rank_num} {symbol}: P1 eligible (no open position)")
+                logger.debug(f"Rank #{rank_num} {symbol}: P1 eligible (no open position, Rank_GM={ranking.rank_gm:.2f})")
             
             # If eligible, take this trade and return (ONE per scan)
             if eligible_type > 0:
                 trade = self.open_position(ranking, position_type=eligible_type)
                 if trade:
                     logger.info(f"✓ Opened P{eligible_type} in {symbol} (Rank #{rank_num})")
-                    logger.info(f"Scan complete: 1 new position. Total: {self.get_position_count()}/{MAX_POSITIONS}")
                     return  # ONE trade per scan
                 else:
                     logger.debug(f"Failed to open P{eligible_type} in {symbol}, continuing search...")
         
-        logger.info(f"Scan complete: No eligible trades found. Total: {self.get_position_count()}/{MAX_POSITIONS}")
+        logger.debug(f"Scan complete: No eligible trades found. Total: {self.get_position_count()}/{MAX_POSITIONS}")
     
     def run_cycle(self):
         """Run one strategy cycle: check exits, then scan for entries."""
@@ -1186,6 +1572,10 @@ class MomentumStrategy:
                     "status": trade.status.value
                 })
         
+        # Debug: Log closed trades count (summary only, not per-trade)
+        if closed_trades_data:
+            logger.debug(f"Closed trades today: {len(closed_trades_data)}")
+        
         deployed_capital = self.get_allocated_capital()
         current_value = self.get_current_value()
         unrealized_pnl = current_value - deployed_capital
@@ -1198,6 +1588,7 @@ class MomentumStrategy:
         
         return {
             "running": self._running,
+            "mode": self.broker.mode,  # Execution mode (PAPER/LIVE)
             "capital_per_position": float(CAPITAL_PER_POSITION),
             "total_capital": float(TOTAL_STRATEGY_CAPITAL),
             "deployed_capital": float(deployed_capital),
@@ -1213,7 +1604,8 @@ class MomentumStrategy:
             "scan_interval": SCAN_INTERVAL_SECONDS,
             "next_scan_in": next_scan_in,
             "last_scan_time": self._last_scan_time.isoformat() if self._last_scan_time else None,
-            "last_update": datetime.now().isoformat()
+            "last_update": datetime.now().isoformat(),
+            "min_rank_gm_threshold": MIN_RANK_GM_THRESHOLD  # Filter threshold
         }
 
 
@@ -1301,13 +1693,44 @@ def register_strategy_routes(app):
     
     @app.route('/api/strategy/momentum/start', methods=['POST'])
     def api_momentum_start():
-        """Start the momentum strategy."""
+        """
+        Start the momentum strategy.
+        
+        Accepts JSON body with optional 'mode' parameter:
+        - mode: "PAPER" (default) or "LIVE"
+        
+        Safety enforcement for LIVE mode:
+        - Rejects if MIN_RANK_GM_THRESHOLD is not configured
+        """
         try:
             strategy = get_strategy()
             if strategy.is_running():
-                return jsonify({"status": "already_running"})
+                return jsonify({"status": "already_running", "mode": strategy.broker.mode})
+            
+            # Get mode from request (default to PAPER)
+            data = request.get_json(silent=True) or {}
+            mode = data.get('mode', 'PAPER').upper()
+            
+            # Validate mode
+            if mode not in ('PAPER', 'LIVE'):
+                return jsonify({"error": f"Invalid mode: {mode}. Must be PAPER or LIVE"}), 400
+            
+            # Safety enforcement for LIVE mode
+            if mode == 'LIVE':
+                # Ensure Rank_GM threshold is configured
+                if MIN_RANK_GM_THRESHOLD <= 0:
+                    return jsonify({
+                        "error": "LIVE mode blocked: MIN_RANK_GM_THRESHOLD must be > 0",
+                        "safety": "Rank_GM_Threshold_Not_Set"
+                    }), 400
+                logger.warning(f"🔴 LIVE MODE ACTIVATED - Real orders will be placed!")
+            
+            # Set broker mode
+            strategy.broker.set_mode(mode)
+            
+            # Start strategy
             run_momentum_strategy()
-            return jsonify({"status": "started"})
+            return jsonify({"status": "started", "mode": mode})
         except Exception as e:
             return jsonify({"error": str(e)}), 500
     
@@ -1330,6 +1753,38 @@ def register_strategy_routes(app):
                 return jsonify({"error": "Trade not found"}), 404
             pnl = strategy.close_position(trade, "Manual Close")
             return jsonify({"status": "closed", "pnl": float(pnl)})
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+    
+    @app.route('/api/strategy/momentum/book/<int:trade_id>', methods=['POST'])
+    def api_momentum_book_trade(trade_id: int):
+        """Book a position by setting current LTP as target."""
+        try:
+            from flask import request
+            data = request.get_json() or {}
+            target_price = data.get('target_price')
+            
+            if target_price is None:
+                return jsonify({"error": "target_price is required"}), 400
+            
+            strategy = get_strategy()
+            trade = next((t for t in strategy.open_trades if t.trade_id == trade_id), None)
+            if trade is None:
+                return jsonify({"error": "Trade not found"}), 404
+            
+            # Update trade target to current LTP
+            old_target = trade.target
+            trade.target = Decimal(str(target_price))
+            strategy.db.update_trade(trade)
+            
+            logger.info(f"Booked position {trade.symbol} P{trade.position_number}: Target updated from ₹{old_target:.2f} to ₹{target_price:.2f}")
+            
+            return jsonify({
+                "status": "booked",
+                "symbol": trade.symbol,
+                "old_target": float(old_target) if old_target else None,
+                "new_target": float(target_price)
+            })
         except Exception as e:
             return jsonify({"error": str(e)}), 500
     

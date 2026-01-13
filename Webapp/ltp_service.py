@@ -7,6 +7,7 @@ from __future__ import annotations
 import os
 import sys
 import importlib.util
+import logging
 import threading
 import time
 from datetime import datetime, timedelta
@@ -1117,7 +1118,7 @@ def fetch_ltp() -> Dict[str, Any]:
     _refresh_vcp_if_needed(symbols)
 
     try:
-        quote_data = kite.quote(list(instruments.values()))
+        quote_data = kite.quote(list(instruments.values())) 
     except Exception as e:
         raise RuntimeError(f"Quote API failed: {e}")
 
@@ -1126,7 +1127,7 @@ def fetch_ltp() -> Dict[str, Any]:
         daily_cache_snapshot = dict(_daily_ma_cache)
     with _sma15m_lock:
         sma15m_snapshot = dict(_sma15m_cache)
-        sma50_15m_snapshot = dict(_sma50_15m_cache)
+        sma50_15m_snapshot = dict(_sma50_15m_cache) 
     high200_15m_snapshot = dict(_high200_15m_cache)
     low200_15m_snapshot = dict(_low200_15m_cache)
     last15m_snapshot = dict(_last15m_close_cache)
@@ -1257,6 +1258,22 @@ def get_ck_data() -> Dict[str, Any]:
         return {"error": str(e)}
     data = ltp_resp.get('data', {})
     out = {}
+    
+    # Get positions data to include position count
+    positions_count = {}
+    try:
+        kite = get_kite()
+        pos_data = kite.positions() or {}
+        for pos_type in ['net', 'day']:
+            if pos_type in pos_data:
+                for pos in pos_data[pos_type]:
+                    symbol = pos.get('tradingsymbol', '').replace('NSE:', '')
+                    if symbol:
+                        qty = abs(pos.get('quantity', 0))
+                        positions_count[symbol] = positions_count.get(symbol, 0) + qty
+    except Exception as e:
+        logging.warning("Failed to fetch positions for CK data: %s", e)
+    
     # Best-effort refresh of daily averages (EMAs)
     try:
         _refresh_daily_averages_if_needed(list(data.keys()))
@@ -1265,6 +1282,7 @@ def get_ck_data() -> Dict[str, Any]:
     for sym, info in data.items():
         last_price = info.get('last_price')
         rsi = _rsi15m_cache.get(sym)
+        position_count = positions_count.get(sym, 0)
         # Strategy heuristics (CK final):
         # - Bullish setup: 15m sma50 > sma200 and daily sma50 > daily sma200
         # - Pullback: bullish but price below 15m sma200 or below sma50_15m
@@ -1312,6 +1330,7 @@ def get_ck_data() -> Dict[str, Any]:
         out[sym] = {
             "last_price": last_price,
             "rsi_15m": rsi,
+            "position_count": position_count,
             "signal": signal,
             "action": action,
             # include drawdown and pullback so CK view can render and colorize them
