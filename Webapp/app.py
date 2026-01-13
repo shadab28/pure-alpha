@@ -152,7 +152,8 @@ def _fetch_gtts_with_timeout(kite, timeout=2.0):
 			else:
 				res = []
 			result['v'] = res
-		except Exception:
+		except Exception as e:
+			error_logger.warning("Failed to fetch GTT list: %s", e)
 			result['v'] = []
 
 	th = threading.Thread(target=worker, daemon=True)
@@ -191,13 +192,13 @@ def _ensure_order_listener():
 				for q in list(_order_event_queues):
 					try:
 						q.put_nowait(msg)
-					except Exception:
-						pass
-			except Exception:
-				# swallow broadcast errors
-				pass
-		except Exception:
-			pass
+					except Exception as e:
+						error_logger.debug("Failed to broadcast order update to queue: %s", e)
+			except Exception as e:
+				# swallow broadcast errors but log them
+				error_logger.warning("Error broadcasting order updates: %s", e)
+		except Exception as e:
+			error_logger.warning("Error in order event handler: %s", e)
 
 	def on_connect(params):
 		# On connect, prime cache with current orders once
@@ -232,8 +233,9 @@ def sse_orders():
 				snapshot = list(_broker_orders_cache.values())
 			try:
 				yield f"data: {json.dumps({'type':'snapshot','orders':snapshot})}\n\n"
-			except Exception:
+			except Exception as e:
 				# if client disconnects early, stop
+				error_logger.debug("Client disconnected from SSE stream: %s", e)
 				return
 			while True:
 				try:
@@ -241,13 +243,14 @@ def sse_orders():
 					yield f"data: {msg}\n\n"
 				except GeneratorExit:
 					break
-				except Exception:
+				except Exception as e:
+					error_logger.debug("Error in SSE generation: %s", e)
 					time.sleep(0.5)
 		# Ensure listener
 		try:
 			_ensure_order_listener()
-		except Exception:
-			pass
+		except Exception as e:
+			error_logger.warning("Failed to ensure order listener: %s", e)
 		return Response(gen(), mimetype='text/event-stream')
 	except Exception as e:
 		error_logger.exception("/events/orders failed: %s", e)
@@ -513,8 +516,8 @@ def api_gtt_recreate():
 			try:
 				if sym in data_map and isinstance(data_map[sym].get('last_price'), (int,float)):
 					ltp = data_map[sym].get('last_price')
-			except Exception:
-				pass
+			except Exception as e:
+				error_logger.debug("Silent exception ignored: %s", e)
 			if not isinstance(ltp, (int,float)) or ltp <= 0:
 				q = quote_map.get(f"NSE:{sym}") or {}
 				v = q.get('last_price')
@@ -529,8 +532,8 @@ def api_gtt_recreate():
 					for o in (g.get('orders') or []):
 						if (o.get('transaction_type') or '').upper() == 'SELL':
 							existing_sell_gtt_ids.append(g.get('id') or g.get('trigger_id'))
-				except Exception:
-					pass
+				except Exception as e:
+					error_logger.debug("Silent exception ignored: %s", e)
 			placed = None
 			trigger_price = None
 			qty = None
@@ -679,8 +682,8 @@ def api_trades():
 					"orders": g.get('orders') or [],
 				})
 				gtt_summary[ts] = entry
-			except Exception:
-				pass
+			except Exception as e:
+				error_logger.debug("Silent exception ignored: %s", e)
 		return jsonify({"count": len(trades), "trades": trades, "gtt_by_symbol": gtt_summary})
 	except Exception as e:
 		error_logger.exception("/api/trades failed: %s", e)
@@ -726,8 +729,8 @@ def api_holdings():
 						lp = d.get('last_price')
 						if isinstance(lp, (int, float)):
 							ltp_map[s] = float(lp)
-					except Exception:
-						pass
+					except Exception as e:
+						error_logger.debug("Silent exception ignored: %s", e)
 			except Exception:
 				ltp_map = {}
 			# Fallback to broker quotes for any missing symbols
@@ -826,9 +829,75 @@ def index():
 	# Ensure we are listening to order updates
 	try:
 		_ensure_order_listener()
-	except Exception:
-		pass
+	except Exception as e:
+		error_logger.debug("Silent exception ignored: %s", e)
 	return render_template("index.html")
+
+@app.get("/health")
+def health_check():
+	"""Health check endpoint for monitoring and load balancers.
+	
+	Returns:
+	- status: 'healthy' or 'degraded'
+	- timestamp: ISO 8601 timestamp
+	- checks: dict with individual check results
+	
+	HTTP Status:
+	- 200 if all checks pass (healthy)
+	- 503 if any critical check fails (degraded)
+	"""
+	try:
+		checks = {
+			'database': False,
+			'broker_api': False,
+			'data_service': False,
+		}
+		
+		# Check database connectivity
+		try:
+			from ltp_service import pg_cursor
+			with pg_cursor() as (cur, conn):
+				cur.execute("SELECT 1")
+			checks['database'] = True
+		except Exception as e:
+			error_logger.warning("Health check: database connectivity failed: %s", e)
+		
+		# Check broker API connectivity
+		try:
+			kite = get_kite()
+			if kite:
+				# Try to get profile (lightweight check)
+				kite.profile()
+				checks['broker_api'] = True
+		except Exception as e:
+			error_logger.warning("Health check: broker API check failed: %s", e)
+		
+		# Check data service (cache populated)
+		try:
+			from ltp_service import _sma15m_cache
+			checks['data_service'] = len(_sma15m_cache) > 0
+		except Exception as e:
+			error_logger.warning("Health check: data service check failed: %s", e)
+		
+		# Consider healthy if database and broker API are working
+		healthy = checks['database'] and checks['broker_api']
+		
+		response = {
+			'status': 'healthy' if healthy else 'degraded',
+			'checks': checks,
+			'timestamp': datetime.utcnow().isoformat() + 'Z',
+		}
+		
+		status_code = 200 if healthy else 503
+		return jsonify(response), status_code
+	
+	except Exception as e:
+		error_logger.exception("Health check endpoint failed: %s", e)
+		return jsonify({
+			'status': 'error',
+			'error': str(e),
+			'timestamp': datetime.utcnow().isoformat() + 'Z',
+		}), 500
 
 @app.route("/export/ltp.csv")
 def export_ltp_csv():
@@ -863,10 +932,10 @@ def _load_tick_sizes(csv_path: str) -> dict:
 					if ts and tick:
 						try:
 							result[ts] = float(tick)
-						except Exception:
-							pass
-	except Exception:
-		pass
+						except Exception as e:
+							error_logger.debug("Silent exception ignored: %s", e)
+	except Exception as e:
+		error_logger.debug("Silent exception ignored: %s", e)
 	return result
 
 def _round_to_tick(price: float, tick: float) -> float:
@@ -1017,8 +1086,8 @@ def _ensure_trailer_thread(kite):
 					try:
 						if ltp_data and sym in ltp_data and isinstance(ltp_data[sym].get('last_price'), (int,float)):
 							ltp = ltp_data[sym].get('last_price')
-					except Exception:
-						pass
+					except Exception as e:
+						error_logger.debug("Silent exception ignored: %s", e)
 					if not isinstance(ltp, (int,float)) or ltp <= 0:
 						continue
 					
@@ -1113,8 +1182,8 @@ def _ensure_trailer_thread(kite):
 							if st.get('gtt_id') and hasattr(kite, 'delete_gtt'):
 								try:
 									kite.delete_gtt(st['gtt_id'])
-								except Exception:
-									pass
+								except Exception as e:
+									error_logger.debug("Silent exception ignored: %s", e)
 							new_id = _place_sl_gtt(kite, sym, st['qty'], ref_price=ltp, sl_pct=st['sl_pct'])
 							with _trail_lock_obj():
 								st['gtt_id'] = new_id
@@ -1529,8 +1598,8 @@ def api_orders():
 					dmap = fetch_ltp().get('data', {})
 					if symbol in dmap and isinstance(dmap[symbol].get('last_price'), (int,float)):
 						ltp = dmap[symbol].get('last_price')
-				except Exception:
-					pass
+				except Exception as e:
+					error_logger.debug("Silent exception ignored: %s", e)
 			od = ord_map.get(str(oid)) or {}
 			status = od.get('status') or 'UNKNOWN'
 			avg_price = od.get('average_price') or od.get('average') or rec.get('limit_price')
@@ -1582,8 +1651,8 @@ def api_orders():
 							for tv in (trigger_values or []):
 								try:
 									vals.append(float(tv))
-								except Exception:
-									pass
+								except Exception as e:
+									error_logger.debug("Silent exception ignored: %s", e)
 							if vals:
 								mx = max(vals)
 								mn = min(vals)
@@ -1594,8 +1663,8 @@ def api_orders():
 							target_price = cand_high if (target_price is None or cand_high > target_price) else target_price
 						if cand_low is not None:
 							stop_price = cand_low if (stop_price is None or cand_low < stop_price) else stop_price
-					except Exception:
-						pass
+					except Exception as e:
+						error_logger.debug("Silent exception ignored: %s", e)
 			pnl = None
 			pnl_pct = None
 			try:
@@ -1631,8 +1700,8 @@ def api_orders():
 									break
 						if current_stop_price is not None:
 							break
-				except Exception:
-					pass
+				except Exception as e:
+					error_logger.debug("Silent exception ignored: %s", e)
 			stop_pct_from_ltp = None
 			target_pct_from_ltp = None
 			try:
@@ -1650,15 +1719,15 @@ def api_orders():
 					tmp = rec.get('gtt_target_price')
 					if isinstance(tmp, (int,float)):
 						target_price = float(tmp)
-			except Exception:
-				pass
+			except Exception as e:
+				error_logger.debug("Silent exception ignored: %s", e)
 			try:
 				if (stop_price is None or not isinstance(stop_price, (int,float))) and rec.get('gtt_stop_price') is not None:
 					tmp2 = rec.get('gtt_stop_price')
 					if isinstance(tmp2, (int,float)):
 						stop_price = float(tmp2)
-			except Exception:
-				pass
+			except Exception as e:
+				error_logger.debug("Silent exception ignored: %s", e)
 			# recompute percent fields if LTP available
 			try:
 				if isinstance(ltp, (int,float)) and ltp>0:
@@ -1666,8 +1735,8 @@ def api_orders():
 						target_pct_from_ltp = ((target_price/float(ltp)) - 1.0) * 100.0
 					if isinstance(stop_price, (int,float)):
 						stop_pct_from_ltp = (1.0 - (stop_price/float(ltp))) * 100.0
-			except Exception:
-				pass
+			except Exception as e:
+				error_logger.debug("Silent exception ignored: %s", e)
 			resp.append({
 				"order_id": oid,
 				"symbol": symbol,
@@ -1793,8 +1862,8 @@ def api_cancel_gtt():
 						_gtt_cache[k] = newarr
 					else:
 						_gtt_cache.pop(k, None)
-		except Exception:
-			pass
+		except Exception as e:
+			error_logger.debug("Silent exception ignored: %s", e)
 		return jsonify({"status": "ok", "gtt_id": gtt_id, "result": res})
 	except Exception as e:
 		error_logger.exception("/api/gtt/cancel failed: %s", e)
