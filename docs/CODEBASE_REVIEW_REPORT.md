@@ -971,8 +971,22 @@ services:
 
 ### Phase 2: High Priority (1 week)
 
-1. [ ] Implement rate limiting on trading endpoints
-2. [ ] Add XSS sanitization for innerHTML assignments
+1. ✅ **Implement rate limiting on trading endpoints**
+   - **Status:** COMPLETED (commit: b013b32)
+   - Flask-Limiter integrated with safe rate limits
+   - 5 orders/minute on buy/book endpoints
+   - 10 operations/minute on cancel endpoints
+   - Per-IP tracking using get_remote_address
+   - See: [PHASE_2_SECURITY_IMPLEMENTATION.md](PHASE_2_SECURITY_IMPLEMENTATION.md)
+
+2. ✅ **Add XSS sanitization for innerHTML assignments**
+   - **Status:** COMPLETED (commit: b013b32)
+   - escapeHtml() function implemented
+   - Updated all row rendering functions (30+ locations)
+   - Escaped error messages and dynamic content
+   - Fixed onclick handler security
+   - See: [PHASE_2_SECURITY_IMPLEMENTATION.md](PHASE_2_SECURITY_IMPLEMENTATION.md)
+
 3. [ ] Consolidate duplicate entry points
 4. [ ] Add structured error logging (replace silent `except: pass`)
 5. [ ] Add health check endpoint
