@@ -50,7 +50,7 @@ POSITION_1_TARGET_PCT = Decimal("5.0")        # Fixed +5% target (50% reduction)
 
 POSITION_2_STOP_LOSS_PCT = Decimal("-2.5")    # Floating -2.5% from entry (trails, 50% reduction)
 POSITION_2_TARGET_PCT = Decimal("3.75")       # Fixed +3.75% target (50% reduction)
-POSITION_2_ENTRY_CONDITION_PNL = Decimal("0.5") # P1 must be > 0.5%
+POSITION_2_ENTRY_CONDITION_PNL = Decimal("0.25") # P1 must be > 0.25%
 
 POSITION_3_STOP_LOSS_PCT = Decimal("-2.5")    # Floating -2.5% (trails, 50% reduction)
 POSITION_3_TARGET_PCT = None                  # No target (runner)
@@ -810,7 +810,7 @@ class MomentumStrategy:
     Position Ladder with OCO GTT Orders:
     - Position 1: Entry when no active positions. Fixed SL -2.5%, Target +5%
       * GTT: OCO (One-Cancels-Other) with fixed SL and fixed target
-    - Position 2: Entry only if P1 PnL > 0.5%. Trailing SL -2.5%, Target +3.75%
+    - Position 2: Entry only if P1 PnL > 0.25%. Trailing SL -2.5%, Target +3.75%
       * GTT: OCO with trailing SL and fixed target (SL updates, target stays same)
     - Position 3: Entry only if avg(P1, P2) PnL >= +2%. Trailing SL -2.5%, No target (runner)
       * GTT: Single SL order only (no target, SL trails upward)
