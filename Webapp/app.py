@@ -8,6 +8,8 @@ from flask import Flask, jsonify, render_template, Response, request
 import time
 import threading
 import json
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 
 # Allow direct execution without treating Webapp as a package
 CURRENT_DIR = os.path.dirname(__file__)
@@ -38,6 +40,15 @@ from ltp_service import fetch_ltp  # type: ignore
 from ltp_service import get_kite  # type: ignore
 
 app = Flask(__name__, template_folder="templates")
+
+# -------- Rate Limiting Setup --------
+# Initialize rate limiter for trading endpoints
+limiter = Limiter(
+	app=app,
+	key_func=get_remote_address,
+	default_limits=["200 per day", "50 per hour"],
+	storage_uri="memory://"
+)
 
 # -------- Logging setup (date-wise subfolders) --------
 LOG_BASE_DIR = os.path.join(REPO_ROOT, 'logs')
@@ -1252,6 +1263,7 @@ def _log_trade_exit(order_id, symbol, exit_price, exit_qty, exit_type='completed
 		# Don't raise - exit logging should not block main flow
 
 @app.post("/api/order/buy")
+@limiter.limit("5 per minute")  # Max 5 buy orders per minute per IP
 def api_place_buy():
 	"""Place a CNC LIMIT buy at LTP with budget INR 10,000 (adjust quantity)."""
 	try:
@@ -1680,6 +1692,7 @@ def api_orders():
 		return jsonify({"error": str(e)}), 500
 
 @app.post('/api/order/cancel')
+@limiter.limit("10 per minute")  # Max 10 cancel requests per minute per IP
 def api_cancel_order():
 	"""Cancel a broker order by order_id (JSON body: {"order_id": "...", "symbol": "..."})."""
 	try:
@@ -1749,6 +1762,7 @@ def api_cancel_order():
 		return jsonify({"error": str(e)}), 500
 
 @app.post('/api/gtt/cancel')
+@limiter.limit("10 per minute")  # Max 10 GTT cancel requests per minute per IP
 def api_cancel_gtt():
 	"""Cancel/delete a GTT by trigger id (JSON body: {"gtt_id": "..."})."""
 	try:
@@ -1787,6 +1801,7 @@ def api_cancel_gtt():
 		return jsonify({"error": str(e)}), 500
 
 @app.post('/api/gtt/book')
+@limiter.limit("5 per minute")  # Max 5 book profit requests per minute per IP
 def api_book_gtt():
 	"""Book profit: modify GTT to set target at LTP (current price), keep stop same.
 	JSON body: {"gtt_id": "...", "symbol": "...", "qty": int, "stop_price": float, "target_price": float}
@@ -2000,6 +2015,7 @@ def api_trade_journal():
 		return jsonify({"error": str(e)}), 500
 
 @app.post('/api/trade-journal/log-exit')
+@limiter.limit("10 per minute")  # Max 10 trade exit logs per minute per IP
 def api_log_trade_exit():
 	"""Manually log a trade exit (called when order is completed/GTT triggered)."""
 	try:

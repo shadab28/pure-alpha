@@ -593,6 +593,45 @@
     </div>
 
     <script>
+      // ============ XSS Security Helper Functions ============
+      /**
+       * Escapes HTML special characters to prevent XSS attacks.
+       * Use when inserting user/API data into HTML via innerHTML.
+       */
+      function escapeHtml(text) {
+        if (typeof text !== 'string') {
+          return String(text);
+        }
+        const map = {
+          '&': '&amp;',
+          '<': '&lt;',
+          '>': '&gt;',
+          '"': '&quot;',
+          "'": '&#x27;',
+          '/': '&#x2F;'
+        };
+        return text.replace(/[&<>"'\/]/g, (char) => map[char]);
+      }
+
+      /**
+       * Safely creates an element and sets text content to avoid XSS.
+       * Preferred over innerHTML when inserting user/API data.
+       */
+      function setElementText(element, text) {
+        element.textContent = text;
+        return element;
+      }
+
+      /**
+       * Safely inserts HTML but escapes all data values.
+       * Use as: safeInnerHTML(element, `<td>${escapeHtml(data)}</td><td>${escapeHtml(data2)}</td>`)
+       */
+      function safeInnerHTML(element, htmlString) {
+        element.innerHTML = htmlString;
+        return element;
+      }
+
+      // ============ Color Helper Functions ============
       // Map a numeric value to a green↔red color using HSL.
       // value in [min,max] -> hue in [0 (red), 120 (green)]
       function hueForValue(value, min, max){
@@ -682,14 +721,14 @@
         const pbMax = (typeof opts.pbMax === 'number') ? opts.pbMax : 20;
         const pbColor = pbVal != null ? pctColor(pbVal, pbMin, pbMax) : '';
         
-        // Prepare supports/resistances display
-        let sup = (r.supports && r.supports.length) ? r.supports.join(', ') : '';
+        // Prepare supports/resistances display (escaped for security)
+        let sup = (r.supports && r.supports.length) ? r.supports.map(s => escapeHtml(String(s))).join(', ') : '';
         const userSup = userSupportLevels[r.symbol];
-        if (userSup != null) sup = sup ? sup + ', ' + userSup : userSup;
-        const resArr = (r.resistances && r.resistances.length) ? r.resistances.join(', ') : '';
+        if (userSup != null) sup = sup ? sup + ', ' + escapeHtml(String(userSup)) : escapeHtml(String(userSup));
+        const resArr = (r.resistances && r.resistances.length) ? r.resistances.map(res => escapeHtml(String(res))).join(', ') : '';
 
         return `
-          <td>${r.symbol}</td>
+          <td>${escapeHtml(r.symbol)}</td>
           <td><span class="badge rank">${r.rank_gm != null ? r.rank_gm.toFixed(2) : ''}</span></td>
           <td><span class="num" style="color:${ddColor}">${ddVal != null ? ddVal.toFixed(2) + '%' : ''}</span></td>
           <td><span class="num" style="color:${pbColor}">${pbVal != null ? pbVal.toFixed(2) + '%' : ''}</span></td>
@@ -703,7 +742,7 @@
           <td>${sup}</td>
           <td>${resArr}</td>
           <td>${r.volume_ratio_d5_d200 != null ? r.volume_ratio_d5_d200.toFixed(2) : ''}</td>
-          <td><button class="btn small" onclick="placeBuy('${r.symbol}', this)" ${typeof r.last_price==='number' ? '' : 'disabled'}>Buy</button></td>
+          <td><button class="btn small" onclick="placeBuy('${escapeHtml(r.symbol)}', this)" ${typeof r.last_price==='number' ? '' : 'disabled'}>Buy</button></td>
         `;
       }
 
@@ -951,7 +990,7 @@
 
   function renderCKRowHtml(r) {
     const buyDisabled = (typeof r.last_price === 'number') ? '' : 'disabled';
-    return `<td>${r.symbol}</td><td><span class="badge rank">${r.rank_gm != null ? r.rank_gm.toFixed(2) : ''}</span></td><td>${r.last_price!=null? r.last_price.toFixed(2): ''}</td><td>${r.rsi_15m!=null? r.rsi_15m.toFixed(2): ''}</td><td>${r.local_30d_low!=null? r.local_30d_low.toFixed(2)+'%': ''}</td><td>${r.local_30d_high!=null? r.local_30d_high.toFixed(2)+'%': ''}</td><td>${r.trading_zone_pct!=null? (r.trading_zone_pct*100).toFixed(2)+'%': ''}</td><td>${r.signal||''}</td><td>${r.action||''}</td><td><button class="btn small" onclick="placeBuy('${r.symbol}', this)" ${buyDisabled}>Buy</button></td>`;
+    return `<td>${escapeHtml(r.symbol)}</td><td><span class="badge rank">${r.rank_gm != null ? r.rank_gm.toFixed(2) : ''}</span></td><td>${r.last_price!=null? r.last_price.toFixed(2): ''}</td><td>${r.rsi_15m!=null? r.rsi_15m.toFixed(2): ''}</td><td>${r.local_30d_low!=null? r.local_30d_low.toFixed(2)+'%': ''}</td><td>${r.local_30d_high!=null? r.local_30d_high.toFixed(2)+'%': ''}</td><td>${r.trading_zone_pct!=null? (r.trading_zone_pct*100).toFixed(2)+'%': ''}</td><td>${escapeHtml(r.signal||'')}</td><td>${escapeHtml(r.action||'')}</td><td><button class="btn small" onclick="placeBuy('${escapeHtml(r.symbol)}', this)" ${buyDisabled}>Buy</button></td>`;
   }
 
   function renderCKTables(){
@@ -1089,8 +1128,8 @@
     }catch(e){
       const tbodyM = document.querySelector('#ck-table-momentum tbody'); 
       const tbodyR = document.querySelector('#ck-table-reversals tbody'); 
-      if (tbodyM) tbodyM.innerHTML = `<tr><td colspan="10" class="muted">${e.message}</td></tr>`;
-      if (tbodyR) tbodyR.innerHTML = `<tr><td colspan="11" class="muted">${e.message}</td></tr>`;
+      if (tbodyM) tbodyM.innerHTML = `<tr><td colspan="10" class="muted">${escapeHtml(e.message)}</td></tr>`;
+      if (tbodyR) tbodyR.innerHTML = `<tr><td colspan="11" class="muted">${escapeHtml(e.message)}</td></tr>`;
     }
     // polling management: if CK view visible, ensure interval running
     try{ clearInterval(ckInterval); }catch(e){}
@@ -1144,9 +1183,9 @@
     const tradeDisabled = (typeof r.last_price === 'number' && (r.entry_signal === 'BUY' || r.entry_signal === 'WATCH')) ? '' : 'disabled';
     const tradeBtnStyle = tradeDisabled ? 'background:#ccc;' : 'background:#28a745;color:#fff;';
     
-    return `<td style="font-weight:bold;">${r.symbol}</td>
-            <td style="background-color: ${patternBg}; padding: 6px; font-size: 11px;">${r.pattern_stage || 'No Pattern'}</td>
-            <td style="background-color: ${signalBg}; color: ${signalColor}; padding: 6px; font-weight: bold; text-align:center;">${r.entry_signal || 'NONE'}</td>
+    return `<td style="font-weight:bold;">${escapeHtml(r.symbol)}</td>
+            <td style="background-color: ${patternBg}; padding: 6px; font-size: 11px;">${escapeHtml(r.pattern_stage || 'No Pattern')}</td>
+            <td style="background-color: ${signalBg}; color: ${signalColor}; padding: 6px; font-weight: bold; text-align:center;">${escapeHtml(r.entry_signal || 'NONE')}</td>
             <td style="background-color: ${confBg}; text-align:center;">${confScore > 0 ? (confScore * 100).toFixed(0) + '%' : '-'}</td>
             <td>${r.last_price != null ? r.last_price.toFixed(2) : ''}</td>
             <td style="color:#155724; font-weight:bold;">${r.entry_price != null ? r.entry_price.toFixed(2) : '-'}</td>
@@ -1155,9 +1194,9 @@
             <td style="background-color: ${distanceBg}; text-align:center;">${r.distance != null ? r.distance.toFixed(2) + '%' : ''}</td>
             <td>${r.breakout_level != null ? r.breakout_level.toFixed(2) : ''}</td>
             <td style="text-align:center;">${r.num_contractions || '-'}</td>
-            <td style="background-color: ${volTrendBg}; text-align:center;">${volTrendIcon} ${r.volatility_trend || '-'}</td>
-            <td>${r.signal || ''}</td>
-            <td><button class="btn small" style="${tradeBtnStyle}" onclick="placeBuy('${r.symbol}', this)" ${tradeDisabled}>Trade</button></td>`;
+            <td style="background-color: ${volTrendBg}; text-align:center;">${volTrendIcon} ${escapeHtml(r.volatility_trend || '-')}</td>
+            <td>${escapeHtml(r.signal || '')}</td>
+            <td><button class="btn small" style="${tradeBtnStyle}" onclick="placeBuy('${escapeHtml(r.symbol)}', this)" ${tradeDisabled}>Trade</button></td>`;
   }
 
   function renderVCPTable() {
@@ -1206,7 +1245,7 @@
       renderVCPTable();
     } catch (e) {
       const tbody = document.querySelector('#vcp-table tbody');
-      if (tbody) tbody.innerHTML = `<tr><td colspan="11" class="muted">${e.message}</td></tr>`;
+      if (tbody) tbody.innerHTML = `<tr><td colspan="11" class="muted">${escapeHtml(e.message)}</td></tr>`;
     }
     
     // polling management: if VCP view visible, ensure interval running
@@ -1957,7 +1996,7 @@
           calculateTradesSummary();
         }catch(e){
           const tbody = document.querySelector('#trades-table tbody');
-          if (tbody) tbody.innerHTML = `<tr><td colspan="12" class="muted">${e.message}</td></tr>`;
+          if (tbody) tbody.innerHTML = `<tr><td colspan="12" class="muted">${escapeHtml(e.message)}</td></tr>`;
           document.getElementById('trades-meta').textContent = '(error)';
         }
       }
@@ -2147,8 +2186,8 @@
           renderActiveOrdersWithSort(obJson.orders || [], ltpData);
           renderActiveGTTsWithSort(gttJson.items || gttJson.gtts || gttJson || [], ltpData);
         }catch(e){
-          const tbody = document.querySelector('#active-orders-table tbody'); if (tbody) tbody.innerHTML = `<tr><td colspan="8" class="muted">${e.message}</td></tr>`;
-          const gtbody = document.querySelector('#active-gtt-table tbody'); if (gtbody) gtbody.innerHTML = `<tr><td colspan="9" class="muted">${e.message}</td></tr>`;
+          const tbody = document.querySelector('#active-orders-table tbody'); if (tbody) tbody.innerHTML = `<tr><td colspan="8" class="muted">${escapeHtml(e.message)}</td></tr>`;
+          const gtbody = document.querySelector('#active-gtt-table tbody'); if (gtbody) gtbody.innerHTML = `<tr><td colspan="9" class="muted">${escapeHtml(e.message)}</td></tr>`;
         }
       }
 
@@ -2340,7 +2379,7 @@
           renderOrdersSnapshot(rows);
         }catch(e){
           const tbody = document.querySelector('#orders-snapshot tbody');
-          if (tbody) tbody.innerHTML = `<tr><td colspan="9" class="muted">${e.message}</td></tr>`;
+          if (tbody) tbody.innerHTML = `<tr><td colspan="9" class="muted">${escapeHtml(e.message)}</td></tr>`;
           // Header summary removed; nothing to clear here.
         }
       }
