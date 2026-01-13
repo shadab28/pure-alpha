@@ -19,6 +19,21 @@ if CURRENT_DIR not in sys.path:
 if REPO_ROOT not in sys.path:
 	sys.path.insert(0, REPO_ROOT)
 
+# Import validation module from repo root
+try:
+	from validation import (
+		validate_symbol, validate_quantity, validate_price,
+		validate_order_type, ValidationError
+	)
+except ImportError:
+	# Fallback if validation module not available
+	class ValidationError(ValueError):
+		pass
+if CURRENT_DIR not in sys.path:
+	sys.path.append(CURRENT_DIR)
+if REPO_ROOT not in sys.path:
+	sys.path.insert(0, REPO_ROOT)
+
 def load_dotenv(path: str):
 	"""Minimal .env loader (does not overwrite existing vars)."""
 	if not os.path.exists(path):
@@ -39,7 +54,24 @@ load_dotenv(os.path.join(REPO_ROOT, '.env'))
 from ltp_service import fetch_ltp  # type: ignore
 from ltp_service import get_kite  # type: ignore
 
+# Import security modules
+try:
+	from security_headers import add_security_headers
+except ImportError:
+	def add_security_headers(app):
+		"""Fallback if security_headers module not available."""
+		@app.after_request
+		def set_basic_headers(response):
+			response.headers['X-Frame-Options'] = 'DENY'
+			response.headers['X-Content-Type-Options'] = 'nosniff'
+			return response
+		return app
+
 app = Flask(__name__, template_folder="templates")
+
+# -------- Security Headers Setup --------
+# Add OWASP-recommended security headers to all responses
+app = add_security_headers(app)
 
 # -------- Rate Limiting Setup --------
 # Initialize rate limiter for trading endpoints
@@ -1337,15 +1369,36 @@ def api_place_buy():
 	"""Place a CNC LIMIT buy at LTP with budget INR 10,000 (adjust quantity)."""
 	try:
 		payload = request.get_json(silent=True) or {}
-		symbol = (payload.get('symbol') or '').strip().upper()
-		budget = float(payload.get('budget', 10000))
+		
+		# ===== INPUT VALIDATION =====
+		try:
+			symbol = validate_symbol(payload.get('symbol', ''))
+		except ValidationError as e:
+			order_logger.warning("Symbol validation failed: %s", e)
+			return jsonify({"error": f"Invalid symbol: {e}"}), 400
+		
+		try:
+			budget = validate_price(payload.get('budget', 10000), min_price=100, max_price=999999)
+		except ValidationError as e:
+			order_logger.warning("Budget validation failed: %s", e)
+			return jsonify({"error": f"Invalid budget: {e}"}), 400
+		
 		offset_pct = float(payload.get('offset_pct', 0.001))
+		if not (0 <= offset_pct <= 0.1):
+			return jsonify({"error": "offset_pct must be between 0 and 0.1"}), 400
+		
 		# Enable trailing SL by default unless explicitly disabled
 		with_tsl = bool(payload.get('tsl', True))
-		sl_pct = float(payload.get('sl_pct', 0.05))
+		
+		try:
+			sl_pct = validate_price(payload.get('sl_pct', 0.05), min_price=0.001, max_price=1.0)
+		except ValidationError as e:
+			order_logger.warning("SL pct validation failed: %s", e)
+			return jsonify({"error": f"Invalid stop loss: {e}"}), 400
+		
 		use_market = bool(payload.get('market', False))
-		if not symbol:
-			return jsonify({"error": "symbol is required"}), 400
+		# ===== END VALIDATION =====
+		
 		order_logger.info("ORDER_REQ symbol=%s budget=%.2f offset=%.4f market=%s tsl=%s sl_pct=%.3f from=%s", symbol, budget, offset_pct, use_market, with_tsl, sl_pct, request.remote_addr)
 		kite = get_kite()
 		# Fetch fresh LTP
