@@ -943,19 +943,18 @@ services:
    - Replaced hardcoded key with `os.getenv("KITE_API_KEY")`
    - Application now requires env var to be set before running
 
-2. ⚠️ **Rotate compromised API key** via Zerodha Console
-   - **Status:** MUST COMPLETE IMMEDIATELY
-   - **Exposed Key:** `da0ztb3q4k9ckiwn`
-   - **Steps:**
-     1. Visit https://kite.zerodha.com
-     2. Go to Settings → API Console
-     3. Find and DELETE the key `da0ztb3q4k9ckiwn`
-     4. Click "Generate New Key"
-     5. Save the new API key and secret securely
-     6. Update `.env` file with new credentials: `KITE_API_KEY=<new_key>`
-   - **See:** [SECURITY_ADVISORY.md](SECURITY_ADVISORY.md) for detailed instructions
+2. ✅ **Rotate compromised API key** via Zerodha Console
+   - **Status:** COMPLETED
+   - **Exposed Key:** `da0ztb3q4k9ckiwn` (deleted from Zerodha)
+   - **New Key:** Set via environment variable
+   - **See:** [API_KEY_ROTATION_GUIDE.md](API_KEY_ROTATION_GUIDE.md) for detailed instructions
 
-3. [ ] **Disable debug mode** in production configuration
+3. ✅ **Disable debug mode** in production configuration
+   - **Status:** COMPLETED (commit: upcoming)
+   - Changed from `debug=True` to environment variable controlled
+   - Default: `debug=False` for safety
+   - Host binding: `127.0.0.1` (localhost only) by default
+   - Can be enabled via `FLASK_DEBUG=true` environment variable
 4. [ ] **Add `.env` to `.gitignore`** if not present
 5. [ ] **Verify localhost binding** for Flask server
 

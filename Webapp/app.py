@@ -2316,5 +2316,15 @@ except Exception as e:
 
 if __name__ == "__main__":
 	# Use 5050 default to avoid macOS AirPlay occupying 5000
-	app.run(host="0.0.0.0", port=int(os.environ.get('PORT', 5050)), debug=True)
+	# Production-safe configuration: localhost only by default, debug disabled by default
+	debug_mode = os.environ.get('FLASK_DEBUG', 'false').lower() in ('true', '1', 'yes')
+	host = os.environ.get('FLASK_HOST', '127.0.0.1')  # Localhost only by default
+	port = int(os.environ.get('PORT', 5050))
+	
+	if debug_mode:
+		logging.warning("⚠️  FLASK DEBUG MODE ENABLED - NOT FOR PRODUCTION")
+	if host != '127.0.0.1':
+		logging.warning("⚠️  FLASK LISTENING ON %s - EXPOSED TO NETWORK", host)
+	
+	app.run(host=host, port=port, debug=debug_mode)
 
