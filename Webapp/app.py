@@ -19,9 +19,9 @@ if CURRENT_DIR not in sys.path:
 if REPO_ROOT not in sys.path:
 	sys.path.insert(0, REPO_ROOT)
 
-# Import validation module from repo root
+# Import validation module from src.security
 try:
-	from validation import (
+	from src.security.validation import (
 		validate_symbol, validate_quantity, validate_price,
 		validate_order_type, ValidationError
 	)
@@ -56,7 +56,7 @@ from ltp_service import get_kite  # type: ignore
 
 # Import security modules
 try:
-	from security_headers import add_security_headers
+	from src.security.security_headers import add_security_headers
 except ImportError:
 	def add_security_headers(app):
 		"""Fallback if security_headers module not available."""
@@ -69,7 +69,7 @@ except ImportError:
 
 # Import authentication modules
 try:
-	from auth import (
+	from src.security.auth import (
 		init_auth, get_current_user, login_user, logout_user,
 		require_login, hash_password, verify_password, User, UserRole
 	)
@@ -97,7 +97,7 @@ except ImportError:
 		pass
 
 try:
-	from csrf_protection import init_csrf, generate_csrf_token, validate_csrf_token, csrf_protect, CSRFError
+	from src.security.csrf_protection import init_csrf, generate_csrf_token, validate_csrf_token, csrf_protect, CSRFError
 except ImportError:
 	# Fallback if CSRF module not available
 	def init_csrf(app):
