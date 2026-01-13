@@ -1,56 +1,74 @@
-# pure-alpha webapp quick start
+# Pure Alpha Trading System
 
-## ⚠️ IMPORTANT SECURITY NOTICE
+## Quick Start
 
-**API Key Setup Required:** See [SECURITY_ADVISORY.md](docs/SECURITY_ADVISORY.md) for critical security update.
+### 1. Setup Credentials
+```bash
+export KITE_API_KEY="your_api_key"
+export KITE_API_SECRET="your_api_secret"
+```
 
-## Setup Instructions
+### 2. Generate Access Token
+```bash
+python3 Core_files/auth.py
+# Creates Core_files/token.txt
+```
 
-1. **Set API credentials** via environment variables:
-   ```bash
-   export KITE_API_KEY="your_api_key"
-   export KITE_API_SECRET="your_api_secret"
-   ```
-   
-   Or copy `.env.example` to `.env` and fill values:
-   ```bash
-   cp .env.example .env
-   # Edit .env with your credentials
-   source .env
-   ```
+### 3. Start the Application
+```bash
+python3 Webapp/main.py --port 5050
+```
 
-2. **Generate access token** via `Core_files/auth.py`:
-   ```bash
-   python3 Core_files/auth.py
-   ```
-   This creates `Core_files/token.txt` (keep it local, don't commit)
+---
 
-3. **Start LTP dashboard** (Python 3.11+ required):
-   ```bash
-   python3 Webapp/main.py --port 5050
-   ```
-   Or: `python3 -m flask --app Webapp/app.py run --host 127.0.0.1 --port 5050`
+## Security & Documentation
 
-## Security Notes
+| Category | Location |
+|----------|----------|
+| **Security Phases (1-3B)** | [`docs/SECURITY/`](docs/SECURITY/) |
+| **Implementation Details** | [`docs/SECURITY/PHASE_3B_COMPLETION.md`](docs/SECURITY/PHASE_3B_COMPLETION.md) |
+| **API Endpoints** | [`docs/SECURITY/SECURITY_GUIDE.md`](docs/SECURITY/SECURITY_GUIDE.md) |
+| **UI Documentation** | [`docs/UI/`](docs/UI/) |
+| **Reference Materials** | [`docs/REFERENCE/`](docs/REFERENCE/) |
 
-- **Never commit `.env`, `token.txt`, or API keys** - already in `.gitignore`
-- API key is loaded from `KITE_API_KEY` environment variable (not hardcoded)
-- Access token is stored in `Core_files/token.txt` (local only, not committed)
-- If secrets accidentally get added, run:
-  ```bash
-  git rm --cached .env Core_files/token.txt
-  git commit -m "Remove accidentally committed secrets"
-  ```
-- **For git history cleanup:** See [SECURITY_ADVISORY.md](docs/SECURITY_ADVISORY.md)
+---
 
-Troubleshooting
-- Import error for kiteconnect: project includes local `kiteconnect/` fallback.
-- 15m candles come from Postgres `ohlcv_data`. Make sure the main ingestion is running.
+## Security Status ✅
 
-# RSI-EMA Intraday Backtester
+- ✅ **Phase 1:** Vulnerability fixes
+- ✅ **Phase 2:** Rate limiting, XSS protection, health checks
+- ✅ **Phase 3A:** Input validation, security headers, SQL audit
+- ✅ **Phase 3B:** Authentication, CSRF protection, RBAC
+- ⏳ **Phase 3C:** Data encryption (pending)
 
-Files:
-- `strategies/rsi_ema_intraday.py` - strategy implementation and utilities
+See [`docs/SECURITY/PHASE_3_PLAN.md`](docs/SECURITY/PHASE_3_PLAN.md) for roadmap.
+
+---
+
+## Important Notes
+
+- **Never commit** `.env`, `token.txt`, or API keys (already in `.gitignore`)
+- API credentials are environment-variable based (not hardcoded)
+- For security details, see [`docs/SECURITY/`](docs/SECURITY/)
+
+---
+
+## File Structure
+
+```
+pure-alpha/
+├── Webapp/              # Flask application
+├── Core_files/          # Authentication, data fetching
+├── codes/               # Jupyter notebooks, research
+├── docs/
+│   ├── SECURITY/        # Security phases and audits
+│   ├── UI/              # UI and terminal customization
+│   └── REFERENCE/       # Additional documentation
+├── auth.py              # Authentication module
+├── csrf_protection.py   # CSRF protection module
+├── validation.py        # Input validation module
+└── README.md            # This file
+```
 - `backtest_runner.py` - simple backtester that selects top 10 by turnover at 09:25, runs strategy, and writes `sample_trade_log.csv`.
 
 Usage:
