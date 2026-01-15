@@ -242,22 +242,22 @@
               <div style="font-weight:600; color:#1e40af; margin-bottom:8px;">Position Ladder Rules:</div>
               <div style="display:grid; grid-template-columns:repeat(3, 1fr); gap:12px;">
                 <div style="padding:8px; background:white; border-radius:6px; border:1px solid #dbeafe;">
-                  <div style="font-weight:600; color:#1e40af;">Position 1</div>
-                  <div style="color:#475569;">Entry: No active positions</div>
-                  <div style="color:#dc2626;">SL: -2.5% (fixed)</div>
-                  <div style="color:#16a34a;">Target: +5%</div>
+                  <div style="font-weight:600; color:#1e40af;">Position 1 <span id="p1-badge" style="font-weight:700; color:#dc2626; background:#fee2e2; padding:2px 6px; border-radius:4px; font-size:12px;">0</span></div>
+                  <div style="color:#475569;" id="p1-entry">Entry: No active positions</div>
+                  <div style="color:#dc2626;" id="p1-sl">SL: -2.5% (fixed)</div>
+                  <div style="color:#16a34a;" id="p1-target">Target: +5%</div>
                 </div>
                 <div style="padding:8px; background:white; border-radius:6px; border:1px solid #dbeafe;">
-                  <div style="font-weight:600; color:#1e40af;">Position 2</div>
-                  <div style="color:#475569;">Entry: P1 PnL > 0.25%</div>
-                  <div style="color:#dc2626;">SL: -2.5% (trailing)</div>
-                  <div style="color:#16a34a;">Target: +3.75%</div>
+                  <div style="font-weight:600; color:#1e40af;">Position 2 <span id="p2-badge" style="font-weight:700; color:#dc2626; background:#fee2e2; padding:2px 6px; border-radius:4px; font-size:12px;">0</span></div>
+                  <div style="color:#475569;" id="p2-entry">Entry: P1 PnL > 0.25%</div>
+                  <div style="color:#dc2626;" id="p2-sl">SL: -2.5% (trailing)</div>
+                  <div style="color:#16a34a;" id="p2-target">Target: Runner</div>
                 </div>
                 <div style="padding:8px; background:white; border-radius:6px; border:1px solid #dbeafe;">
-                  <div style="font-weight:600; color:#1e40af;">Position 3</div>
-                  <div style="color:#475569;">Entry: Avg(P1,P2) ≥ +2%</div>
-                  <div style="color:#dc2626;">SL: -2.5% (trailing)</div>
-                  <div style="color:#16a34a;">Target: Runner</div>
+                  <div style="font-weight:600; color:#1e40af;">Position 3 <span id="p3-badge" style="font-weight:700; color:#dc2626; background:#fee2e2; padding:2px 6px; border-radius:4px; font-size:12px;">0</span></div>
+                  <div style="color:#475569;" id="p3-entry">Entry: Avg(P1,P2) ≥ +1%</div>
+                  <div style="color:#dc2626;" id="p3-sl">SL: -5% (trailing)</div>
+                  <div style="color:#16a34a;" id="p3-target">Target: Runner</div>
                 </div>
               </div>
             </div>
@@ -274,16 +274,16 @@
               <table id="strategy-open-table">
                 <thead>
                   <tr>
-                    <th>Position</th>
-                    <th>Symbol</th>
-                    <th>Entry Time</th>
-                    <th>Entry Price</th>
-                    <th>Qty</th>
-                    <th>LTP</th>
-                    <th>Stop Loss</th>
-                    <th>Target</th>
-                    <th>PnL %</th>
-                    <th>PnL ₹</th>
+                    <th data-key="position_number">Position</th>
+                    <th data-key="symbol">Symbol</th>
+                    <th data-key="entry_time">Entry Time</th>
+                    <th data-key="entry_price">Entry Price</th>
+                    <th data-key="qty">Qty</th>
+                    <th data-key="ltp">LTP</th>
+                    <th data-key="stop_loss">Stop Loss</th>
+                    <th data-key="target">Target</th>
+                    <th data-key="current_pnl_pct">PnL %</th>
+                    <th data-key="current_pnl_inr">PnL ₹</th>
                     <th>Action</th>
                   </tr>
                 </thead>
@@ -973,6 +973,7 @@
       ckSubtabStrategy.classList.remove('secondary'); ckSubtabStrategy.classList.add('active');
       document.getElementById('ck-view-strategy').style.display = 'block';
       fetchStrategyStatus(); // Fetch strategy status when switching to this tab
+      fetchStrategyParameters(); // Fetch strategy parameters
     }
     renderCKTables();
   }
@@ -1424,6 +1425,47 @@
     fetchActiveOrderbook();
   });
 
+  // ========== STRATEGY OPEN POSITIONS SORTING ==========
+  let sortStateStrategyOpen = { key: 'entry_time', dir: 'desc' };
+  
+  function renderStrategyOpenTable(trades) {
+    const openTbody = document.getElementById('strategy-open-tbody');
+    if (!trades || trades.length === 0) {
+      openTbody.innerHTML = '<tr><td colspan="11" style="text-align:center; color:#94a3b8; padding:20px;">No open positions</td></tr>';
+      return;
+    }
+    
+    // Apply sorting
+    const sortedTrades = trades.slice();
+    applySort(sortedTrades, sortStateStrategyOpen);
+    
+    // Render sorted trades
+    openTbody.innerHTML = sortedTrades.map(t => {
+      const pnlColor = (t.current_pnl_pct || 0) >= 0 ? '#16a34a' : '#dc2626';
+      return `<tr data-trade-id="${t.trade_id}">
+        <td><span class="badge" style="background:#3b82f6;color:white;">P${t.position_number}</span></td>
+        <td><strong>${t.symbol}</strong></td>
+        <td>${new Date(t.entry_time).toLocaleTimeString()}</td>
+        <td>₹${t.entry_price?.toFixed(2) || '-'}</td>
+        <td>${t.qty}</td>
+        <td>₹${t.ltp?.toFixed(2) || '-'}</td>
+        <td style="color:#dc2626;">₹${t.stop_loss?.toFixed(2) || '-'}</td>
+        <td style="color:#16a34a;">${t.target ? '₹' + t.target.toFixed(2) : 'Runner'}</td>
+        <td style="color:${pnlColor};font-weight:600;">${t.current_pnl_pct?.toFixed(2) || '0.00'}%</td>
+        <td style="color:${pnlColor};font-weight:600;">₹${t.current_pnl_inr?.toFixed(2) || '0.00'}</td>
+        <td>
+          <button class="btn small" style="background:#3b82f6;border-color:#3b82f6;" onclick="bookPosition(${t.trade_id}, '${t.symbol}', ${t.ltp || 0})">Book</button>
+          <button class="btn small" style="background:#16a34a;border-color:#16a34a;margin-left:4px;" onclick="clearPosition(${t.trade_id}, '${t.symbol}', ${t.ltp || 0})">Clear</button>
+        </td>
+      </tr>`;
+    }).join('');
+  }
+  
+  attachSortingFor('strategy-open-table', sortStateStrategyOpen, () => {
+    // Re-render with new sort - fetch latest status to get trades
+    fetchStrategyStatus();
+  });
+
   // ========== MOMENTUM STRATEGY FUNCTIONS ==========
   let strategyInterval = null;
   let strategyTimerInterval = null;  // For continuous countdown
@@ -1440,6 +1482,32 @@
       // Show error state
       document.getElementById('strategy-status-badge').textContent = 'ERROR';
       document.getElementById('strategy-status-badge').style.background = '#f97316';
+    }
+  }
+
+  async function fetchStrategyParameters() {
+    try {
+      const res = await fetch('/api/strategy/momentum/parameters');
+      const params = await res.json();
+      if (!res.ok) throw new Error(params.error || 'Failed to fetch parameters');
+      
+      // Update Position 1
+      document.getElementById('p1-entry').textContent = 'Entry: ' + params.position_1.entry;
+      document.getElementById('p1-sl').textContent = `SL: ${params.position_1.stop_loss_pct} (${params.position_1.stop_loss_type})`;
+      document.getElementById('p1-target').textContent = 'Target: ' + params.position_1.target_pct;
+      
+      // Update Position 2
+      document.getElementById('p2-entry').textContent = 'Entry: ' + params.position_2.entry;
+      document.getElementById('p2-sl').textContent = `SL: ${params.position_2.stop_loss_pct} (${params.position_2.stop_loss_type})`;
+      document.getElementById('p2-target').textContent = 'Target: ' + params.position_2.target_pct;
+      
+      // Update Position 3
+      document.getElementById('p3-entry').textContent = 'Entry: ' + params.position_3.entry;
+      document.getElementById('p3-sl').textContent = `SL: ${params.position_3.stop_loss_pct} (${params.position_3.stop_loss_type})`;
+      document.getElementById('p3-target').textContent = 'Target: ' + params.position_3.target_pct;
+      
+    } catch (e) {
+      console.error('fetchStrategyParameters error:', e);
     }
   }
 
@@ -1567,28 +1635,13 @@
     netPnlEl.textContent = netPnlSign + '₹' + netPnl.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
     netPnlEl.style.color = netPnl >= 0 ? '#16a34a' : '#dc2626';
     
-    // Update open positions table
-    const openTbody = document.getElementById('strategy-open-tbody');
-    if (data.open_trades && data.open_trades.length > 0) {
-      openTbody.innerHTML = data.open_trades.map(t => {
-        const pnlColor = (t.current_pnl_pct || 0) >= 0 ? '#16a34a' : '#dc2626';
-        return `<tr data-trade-id="${t.trade_id}">
-          <td><span class="badge" style="background:#3b82f6;color:white;">P${t.position_number}</span></td>
-          <td><strong>${t.symbol}</strong></td>
-          <td>${new Date(t.entry_time).toLocaleTimeString()}</td>
-          <td>₹${t.entry_price?.toFixed(2) || '-'}</td>
-          <td>${t.qty}</td>
-          <td>₹${t.ltp?.toFixed(2) || '-'}</td>
-          <td style="color:#dc2626;">₹${t.stop_loss?.toFixed(2) || '-'}</td>
-          <td style="color:#16a34a;">${t.target ? '₹' + t.target.toFixed(2) : 'Runner'}</td>
-          <td style="color:${pnlColor};font-weight:600;">${t.current_pnl_pct?.toFixed(2) || '0.00'}%</td>
-          <td style="color:${pnlColor};font-weight:600;">₹${t.current_pnl_inr?.toFixed(2) || '0.00'}</td>
-          <td><button class="btn small" style="background:#3b82f6;border-color:#3b82f6;" onclick="bookPosition(${t.trade_id}, '${t.symbol}', ${t.ltp || 0})">Book</button></td>
-        </tr>`;
-      }).join('');
-    } else {
-      openTbody.innerHTML = '<tr><td colspan="11" style="text-align:center; color:#94a3b8; padding:20px;">No open positions</td></tr>';
-    }
+    // Update position count badges in position ladder rules
+    document.getElementById('p1-badge').textContent = data.p1_count || 0;
+    document.getElementById('p2-badge').textContent = data.p2_count || 0;
+    document.getElementById('p3-badge').textContent = data.p3_count || 0;
+    
+    // Update open positions table using sorted render function
+    renderStrategyOpenTable(data.open_trades || []);
     
     // Update closed trades table
     const closedTbody = document.getElementById('strategy-closed-tbody');
@@ -1743,51 +1796,67 @@
     }
   }
 
-  async function closeAllPositions() {
+  async function clearPosition(tradeId, symbol, currentLtp) {
     try {
-      const ok = window.confirm('Are you sure you want to close ALL open positions? This cannot be undone.');
+      const ok = window.confirm(`Clear position in ${symbol} at ₹${currentLtp.toFixed(2)}? This will close the position and mark it as booked.`);
       if (!ok) return;
       
-      const btnCloseAll = document.getElementById('btn-close-all');
-      btnCloseAll.disabled = true;
-      btnCloseAll.textContent = 'Closing...';
+      const res = await fetch(`/api/strategy/momentum/clear/${tradeId}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ exit_price: currentLtp })
+      });
+      const data = await res.json();
       
-      // Get current open trades from the table
-      const rows = document.querySelectorAll('#strategy-open-tbody tr');
-      if (rows.length === 0 || (rows.length === 1 && rows[0].querySelector('td[colspan]'))) {
-        alert('No open positions to close');
-        btnCloseAll.disabled = false;
-        btnCloseAll.textContent = '✕ Close All';
-        return;
-      }
-      
-      // Close each position sequentially
-      let closed = 0;
-      for (const row of rows) {
-        const tdTrade = row.querySelector('td:nth-child(1)');
-        if (!tdTrade || tdTrade.getAttribute('colspan')) continue;
-        
-        // Extract trade_id from the row data
-        const tradeId = row.getAttribute('data-trade-id');
-        const symbol = row.querySelector('td:nth-child(2)')?.textContent || 'UNKNOWN';
-        
-        if (tradeId) {
-          try {
-            const res = await fetch(`/api/strategy/momentum/close/${tradeId}`, { method: 'POST' });
-            if (res.ok) closed++;
-          } catch (e) {
-            console.error(`Failed to close ${symbol}:`, e);
-          }
-        }
-      }
-      
-      alert(`Closed ${closed} position(s)`);
+      if (!res.ok) throw new Error(data.error || 'Failed to clear position');
       
       // Refresh status
       await fetchStrategyStatus();
       
     } catch (e) {
-      alert('Error closing positions: ' + e.message);
+      alert('Error clearing position: ' + e.message);
+    }
+  }
+
+  async function closeAllPositions() {
+    try {
+      const ok = window.confirm('Are you sure you want to close ALL open positions and reset the strategy? This cannot be undone.');
+      if (!ok) return;
+      
+      const btnCloseAll = document.getElementById('btn-close-all');
+      btnCloseAll.disabled = true;
+      btnCloseAll.textContent = 'Resetting...';
+      
+      try {
+        // Call the reset endpoint which closes all positions and clears state
+        const res = await fetch('/api/strategy/momentum/reset', { method: 'POST' });
+        const data = await res.json();
+        
+        if (res.ok) {
+          console.log('Reset response:', data);
+          alert(`✓ Strategy Reset Complete!\n\nClosed: ${data.closed} position(s)\nFailed: ${data.failed}\n\nStrategy restarted with zero positions.`);
+        } else {
+          alert(`✗ Reset Failed: ${data.error}`);
+        }
+      } catch (e) {
+        alert(`Error resetting strategy: ${e.message}`);
+      }
+      
+      // Wait a moment for backend to fully process, then refresh
+      console.log('Waiting for backend to process reset...');
+      await new Promise(resolve => setTimeout(resolve, 500));
+      
+      console.log('Fetching updated strategy status...');
+      // Refresh status to update UI with cache busting
+      const statusRes = await fetch('/api/strategy/momentum/status?t=' + Date.now());
+      const statusData = await statusRes.json();
+      console.log('Status response:', statusData);
+      console.log('Open trades count:', statusData.open_trades?.length || 0);
+      
+      updateStrategyUI(statusData);
+      
+    } catch (e) {
+      alert('Error resetting strategy: ' + e.message);
     } finally {
       const btnCloseAll = document.getElementById('btn-close-all');
       btnCloseAll.disabled = false;
@@ -2455,6 +2524,9 @@
         totalsTr.innerHTML = cells.map(c=>`<td>${c}</td>`).join('');
         tbody.appendChild(totalsTr);
       }
+      
+      // Initialize strategy parameters on page load
+      fetchStrategyParameters();
     </script>
   </body>
 </html>

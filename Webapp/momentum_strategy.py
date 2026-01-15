@@ -48,17 +48,22 @@ MIN_RANK_GM_THRESHOLD = 2.5  # HARD filter: Only trade when Rank_GM > 2.5
 POSITION_1_STOP_LOSS_PCT = Decimal("-2.5")    # Fixed -2.5% from entry (50% reduction)
 POSITION_1_TARGET_PCT = Decimal("5.0")        # Fixed +5% target (50% reduction)
 
-POSITION_2_STOP_LOSS_PCT = Decimal("-2.5")    # Floating -2.5% from entry (trails, 50% reduction)
-POSITION_2_TARGET_PCT = Decimal("3.75")       # Fixed +3.75% target (50% reduction)
+POSITION_2_STOP_LOSS_PCT = Decimal("-2.5")    # Floating -2.5% from entry
+POSITION_2_TARGET_PCT = None       # No target (runner)
 POSITION_2_ENTRY_CONDITION_PNL = Decimal("0.25") # P1 must be > 0.25%
 
-POSITION_3_STOP_LOSS_PCT = Decimal("-2.5")    # Floating -2.5% (trails, 50% reduction)
+POSITION_3_STOP_LOSS_PCT = Decimal("-5")    # Floating -5% (trails, 50% reduction)
 POSITION_3_TARGET_PCT = None                  # No target (runner)
-POSITION_3_ENTRY_CONDITION_AVG_PNL = Decimal("2.0")  # Avg of P1 & P2 >= 2%
+POSITION_3_ENTRY_CONDITION_AVG_PNL = Decimal("1.0")  # Avg of P1 & P2 >= 1%
 
 # Database path
 DB_DIR = os.path.dirname(__file__)
-DB_PATH = os.path.join(DB_DIR, "momentum_strategy.db")
+DB_PATH_PAPER = os.path.join(DB_DIR, "momentum_strategy_paper.db")
+DB_PATH_LIVE = os.path.join(DB_DIR, "momentum_strategy_live.db")
+
+def get_db_path(mode: str = "PAPER") -> str:
+    """Get database path based on trading mode."""
+    return DB_PATH_LIVE if mode == "LIVE" else DB_PATH_PAPER
 
 # ANSI Color codes
 class Colors:
@@ -295,6 +300,42 @@ class Broker:
         with self._lock:
             return self._ltp_cache.get(symbol)
     
+    def get_mid_price(self, symbol: str) -> Optional[Decimal]:
+        """
+        Get mid-price (bid+ask)/2 for a symbol using Kite quote API.
+        
+        Falls back to LTP if quote fetch fails or in PAPER mode.
+        """
+        if self.mode == "LIVE":
+            try:
+                kite = self._get_kite()
+                instrument = f"NSE:{symbol}"
+                quote_data = kite.quote(instrument)
+                
+                if instrument in quote_data:
+                    depth = quote_data[instrument].get('depth', {})
+                    buy_depth = depth.get('buy', [])
+                    sell_depth = depth.get('sell', [])
+                    
+                    # Get best bid and ask
+                    best_bid = buy_depth[0]['price'] if buy_depth and buy_depth[0]['price'] > 0 else None
+                    best_ask = sell_depth[0]['price'] if sell_depth and sell_depth[0]['price'] > 0 else None
+                    
+                    if best_bid and best_ask:
+                        mid_price = Decimal(str((best_bid + best_ask) / 2))
+                        logger.debug(f"Mid-price for {symbol}: Bid=₹{best_bid}, Ask=₹{best_ask}, Mid=₹{mid_price:.2f}")
+                        return mid_price
+                    elif best_bid:
+                        return Decimal(str(best_bid))
+                    elif best_ask:
+                        return Decimal(str(best_ask))
+                
+            except Exception as e:
+                logger.warning(f"Failed to get mid-price for {symbol}: {e}")
+        
+        # Fallback to LTP
+        return self.get_ltp(symbol)
+    
     def place_order(
         self,
         symbol: str,
@@ -306,7 +347,7 @@ class Broker:
         Place an order (BUY or SELL).
         
         In PAPER mode, simulates immediate fill at current LTP or specified price.
-        In LIVE mode, places real order via Kite API.
+        In LIVE mode, places LIMIT order at mid-price (bid+ask)/2 via Kite API.
         
         Returns:
             dict with order_id, fill_price, fill_qty, status
@@ -315,9 +356,22 @@ class Broker:
             self._order_id_counter += 1
             order_id = f"MOM_{self._order_id_counter}"
         
-        # Get execution price
+        # Get execution price - use mid-price in LIVE mode, LTP in PAPER mode
         if price is not None:
             exec_price = price
+        elif self.mode == "LIVE":
+            # Use mid-price for LIVE orders
+            mid_price = self.get_mid_price(symbol)
+            if mid_price is None:
+                logger.error(f"Cannot place order for {symbol}: No mid-price available")
+                return {
+                    "order_id": order_id,
+                    "status": "REJECTED",
+                    "reason": "No mid-price available",
+                    "fill_price": None,
+                    "fill_qty": 0
+                }
+            exec_price = mid_price
         else:
             ltp = self.get_ltp(symbol)
             if ltp is None:
@@ -344,10 +398,13 @@ class Broker:
                 "timestamp": datetime.now()
             }
         else:
-            # LIVE mode - place real order via Kite API
+            # LIVE mode - place LIMIT order at mid-price via Kite API
             try:
                 kite = self._get_kite()
                 transaction_type = kite.TRANSACTION_TYPE_BUY if side == OrderSide.BUY else kite.TRANSACTION_TYPE_SELL
+                
+                # Round price to tick size (0.05 for most NSE stocks)
+                limit_price = float(round(exec_price * 20) / 20)  # Round to nearest 0.05
                 
                 live_order_id = kite.place_order(
                     variety=kite.VARIETY_REGULAR,
@@ -356,15 +413,16 @@ class Broker:
                     transaction_type=transaction_type,
                     quantity=qty,
                     product=kite.PRODUCT_CNC,
-                    order_type=kite.ORDER_TYPE_MARKET
+                    order_type=kite.ORDER_TYPE_LIMIT,
+                    price=limit_price
                 )
                 
-                logger.info(f"[LIVE] {side.value} Order: {symbol} qty={qty} @ ₹{exec_price} | Order ID: {live_order_id}")
+                logger.info(f"[LIVE] {side.value} LIMIT Order: {symbol} qty={qty} @ ₹{limit_price:.2f} (mid-price) | Order ID: {live_order_id}")
                 
                 return {
                     "order_id": str(live_order_id),
                     "status": "COMPLETE",
-                    "fill_price": exec_price,
+                    "fill_price": Decimal(str(limit_price)),
                     "fill_qty": qty,
                     "timestamp": datetime.now()
                 }
@@ -443,8 +501,9 @@ class Broker:
 class StrategyDB:
     """SQLite database manager for strategy persistence."""
     
-    def __init__(self, db_path: str = DB_PATH):
-        self.db_path = db_path
+    def __init__(self, mode: str = "PAPER"):
+        self.mode = mode
+        self.db_path = get_db_path(mode)
         self._lock = threading.Lock()
         self._init_db()
     
@@ -812,13 +871,13 @@ class MomentumStrategy:
       * GTT: OCO (One-Cancels-Other) with fixed SL and fixed target
     - Position 2: Entry only if P1 PnL > 0.25%. Trailing SL -2.5%, Target +3.75%
       * GTT: OCO with trailing SL and fixed target (SL updates, target stays same)
-    - Position 3: Entry only if avg(P1, P2) PnL >= +2%. Trailing SL -2.5%, No target (runner)
+    - Position 3: Entry only if avg(P1, P2) PnL >= +1%. Trailing SL -2.5%, No target (runner)
       * GTT: Single SL order only (no target, SL trails upward)
     """
     
-    def __init__(self, broker: Optional[Broker] = None, db: Optional[StrategyDB] = None):
-        self.broker = broker or Broker(mode="PAPER")
-        self.db = db or StrategyDB()
+    def __init__(self, broker: Optional[Broker] = None, db: Optional[StrategyDB] = None, mode: str = "PAPER"):
+        self.broker = broker or Broker(mode=mode)
+        self.db = db or StrategyDB(mode=mode)
         self.open_trades: List[Trade] = []
         self._running = False
         self._stop_event = threading.Event()
@@ -829,7 +888,30 @@ class MomentumStrategy:
         # Load existing open trades from DB (restart safety)
         self._load_open_trades()
         
-        logger.info("MomentumStrategy initialized")
+        logger.info(f"MomentumStrategy initialized (mode={mode}, db={self.db.db_path})")
+    
+    def switch_mode(self, new_mode: str):
+        """Switch trading mode and reload database accordingly."""
+        if new_mode not in ("PAPER", "LIVE"):
+            raise ValueError(f"Invalid mode: {new_mode}. Must be PAPER or LIVE")
+        
+        old_mode = self.broker.mode
+        if old_mode == new_mode:
+            logger.info(f"Already in {new_mode} mode")
+            return
+        
+        # Change broker mode
+        self.broker.set_mode(new_mode)
+        
+        # Switch to mode-specific database
+        self.db = StrategyDB(mode=new_mode)
+        
+        # Reload open trades from new database
+        self._load_open_trades()
+        
+        logger.info(f"Switched from {old_mode} to {new_mode} mode")
+        logger.info(f"  Database: {self.db.db_path}")
+        logger.info(f"  Open trades loaded: {len(self.open_trades)}")
     
     def _load_open_trades(self):
         """Load open trades from database on startup."""
@@ -902,8 +984,8 @@ class MomentumStrategy:
         P1, P2, P3 are entry levels for the SAME stock:
         - P1 = First entry in a stock
         - P2 = Second entry (adding to position) - requires P1 in profit
-        - P3 = Third entry (final add) - requires avg(P1,P2) >= 2%
-        
+        - P3 = Third entry (final add) - requires avg(P1,P2) >= 1%
+
         Returns 0 if no more entries allowed for this symbol.
         """
         # Get existing positions for this symbol
@@ -1260,8 +1342,9 @@ class MomentumStrategy:
         # Get current price
         ltp = self.broker.get_ltp(trade.symbol)
         if ltp is None:
-            logger.error(f"Cannot close {trade.symbol}: No LTP")
-            return Decimal("0")
+            # Use entry price as fallback for forced liquidation scenarios (e.g., reset)
+            logger.warning(f"No LTP for {trade.symbol}, using entry price as fallback for close")
+            ltp = trade.entry_price
         
         # Place exit order
         order_result = self.broker.exit_order(trade)
@@ -1357,11 +1440,27 @@ class MomentumStrategy:
            - Else if qualifies for P2, take P2
            - Else if new stock, take P1
         4. HARD FILTER: Rank_GM must be > MIN_RANK_GM_THRESHOLD (3)
+        5. TIME FILTER: Only enter between 9:45 AM and 3:00 PM
         
         This ensures gradual position building, one trade at a time.
         """
         if self.get_position_count() >= MAX_POSITIONS:
             logger.info(f"All {MAX_POSITIONS} positions filled, no new entries")
+            return
+        
+        # TIME FILTER: Only allow entries between 9:45 AM and 3:00 PM
+        from datetime import time as dt_time
+        now = datetime.now()
+        market_open = dt_time(9, 45)   # 9:45 AM
+        market_close = dt_time(15, 0)  # 3:00 PM
+        current_time = now.time()
+        
+        if current_time < market_open:
+            logger.debug(f"Entry blocked: Before market hours (current: {current_time.strftime('%H:%M')}, opens at 9:45)")
+            return
+        
+        if current_time >= market_close:
+            logger.debug(f"Entry blocked: After entry cutoff (current: {current_time.strftime('%H:%M')}, cutoff at 15:00)")
             return
         
         # Get fresh rankings (sorted by rank, best first)
@@ -1578,10 +1677,6 @@ class MomentumStrategy:
                     "status": trade.status.value
                 })
         
-        # Debug: Log closed trades count (summary only, not per-trade)
-        if closed_trades_data:
-            logger.debug(f"Closed trades today: {len(closed_trades_data)}")
-        
         deployed_capital = self.get_allocated_capital()
         current_value = self.get_current_value()
         unrealized_pnl = current_value - deployed_capital
@@ -1591,6 +1686,11 @@ class MomentumStrategy:
         if self._last_scan_time and self._running:
             elapsed = (datetime.now() - self._last_scan_time).total_seconds()
             next_scan_in = max(0, SCAN_INTERVAL_SECONDS - int(elapsed))
+        
+        # Count positions by type
+        p1_count = sum(1 for trade in self.open_trades if trade.position_number == 1)
+        p2_count = sum(1 for trade in self.open_trades if trade.position_number == 2)
+        p3_count = sum(1 for trade in self.open_trades if trade.position_number == 3)
         
         return {
             "running": self._running,
@@ -1604,6 +1704,9 @@ class MomentumStrategy:
             "remaining_capital": float(self.get_remaining_capital()),
             "active_positions": self.get_position_count(),
             "max_positions": MAX_POSITIONS,
+            "p1_count": p1_count,
+            "p2_count": p2_count,
+            "p3_count": p3_count,
             "realized_pnl_today": float(self.db.get_total_pnl_today()),
             "open_trades": open_trades_data,
             "closed_trades_today": closed_trades_data,
@@ -1611,7 +1714,8 @@ class MomentumStrategy:
             "next_scan_in": next_scan_in,
             "last_scan_time": self._last_scan_time.isoformat() if self._last_scan_time else None,
             "last_update": datetime.now().isoformat(),
-            "min_rank_gm_threshold": MIN_RANK_GM_THRESHOLD  # Filter threshold
+            "min_rank_gm_threshold": MIN_RANK_GM_THRESHOLD,  # Filter threshold
+            "db_path": self.db.db_path  # Database path for current mode
         }
 
 
@@ -1697,6 +1801,43 @@ def register_strategy_routes(app):
         except Exception as e:
             return jsonify({"error": str(e)}), 500
     
+    @app.route('/api/strategy/momentum/parameters')
+    def api_momentum_parameters():
+        """Get momentum strategy position ladder parameters."""
+        try:
+            params = {
+                "position_1": {
+                    "entry": "No active positions",
+                    "stop_loss": float(POSITION_1_STOP_LOSS_PCT),
+                    "stop_loss_pct": f"{POSITION_1_STOP_LOSS_PCT}%",
+                    "stop_loss_type": "Fixed",
+                    "target": float(POSITION_1_TARGET_PCT),
+                    "target_pct": f"+{POSITION_1_TARGET_PCT}%"
+                },
+                "position_2": {
+                    "entry": f"P1 PnL > {float(POSITION_2_ENTRY_CONDITION_PNL)}%",
+                    "stop_loss": float(POSITION_2_STOP_LOSS_PCT),
+                    "stop_loss_pct": f"{POSITION_2_STOP_LOSS_PCT}%",
+                    "stop_loss_type": "Trailing",
+                    "target": float(POSITION_2_TARGET_PCT) if POSITION_2_TARGET_PCT else None,
+                    "target_pct": f"+{POSITION_2_TARGET_PCT}%" if POSITION_2_TARGET_PCT else "Runner"
+                },
+                "position_3": {
+                    "entry": f"Avg(P1,P2) ≥ +{float(POSITION_3_ENTRY_CONDITION_AVG_PNL)}%",
+                    "stop_loss": float(POSITION_3_STOP_LOSS_PCT),
+                    "stop_loss_pct": f"{POSITION_3_STOP_LOSS_PCT}%",
+                    "stop_loss_type": "Trailing",
+                    "target": float(POSITION_3_TARGET_PCT) if POSITION_3_TARGET_PCT else None,
+                    "target_pct": f"+{POSITION_3_TARGET_PCT}%" if POSITION_3_TARGET_PCT else "Runner"
+                },
+                "general": {
+                    "min_rank_threshold": float(MIN_RANK_GM_THRESHOLD)
+                }
+            }
+            return jsonify(params)
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+    
     @app.route('/api/strategy/momentum/start', methods=['POST'])
     def api_momentum_start():
         """
@@ -1732,12 +1873,12 @@ def register_strategy_routes(app):
                 live_mode_msg = f"{Colors.BOLD}{Colors.RED}🔴 LIVE MODE ACTIVATED - Real orders will be placed!{Colors.RESET}"
                 logger.warning(live_mode_msg)
             
-            # Set broker mode
-            strategy.broker.set_mode(mode)
+            # Switch mode (this also switches database and reloads trades)
+            strategy.switch_mode(mode)
             
             # Start strategy
             run_momentum_strategy()
-            return jsonify({"status": "started", "mode": mode})
+            return jsonify({"status": "started", "mode": mode, "db": strategy.db.db_path})
         except Exception as e:
             return jsonify({"error": str(e)}), 500
     
@@ -1793,6 +1934,132 @@ def register_strategy_routes(app):
                 "new_target": float(target_price)
             })
         except Exception as e:
+            return jsonify({"error": str(e)}), 500
+    
+    @app.route('/api/strategy/momentum/clear/<int:trade_id>', methods=['POST'])
+    def api_momentum_clear_trade(trade_id: int):
+        """Clear a position - close it immediately and mark as booked."""
+        try:
+            from flask import request
+            data = request.get_json() or {}
+            exit_price = data.get('exit_price')
+            
+            strategy = get_strategy()
+            trade = next((t for t in strategy.open_trades if t.trade_id == trade_id), None)
+            if trade is None:
+                return jsonify({"error": "Trade not found"}), 404
+            
+            # Use provided exit price or fetch LTP
+            if exit_price is None:
+                exit_price = strategy.broker.get_ltp(trade.symbol)
+            if exit_price is None:
+                exit_price = float(trade.entry_price)  # Fallback to entry price
+            
+            exit_price = Decimal(str(exit_price))
+            
+            # Calculate PnL
+            pnl = (exit_price - trade.entry_price) * Decimal(trade.qty)
+            pnl_pct = ((exit_price - trade.entry_price) / trade.entry_price * 100)
+            
+            # Update trade as closed
+            trade.exit_time = datetime.now()
+            trade.exit_price = exit_price
+            trade.pnl = pnl
+            trade.status = TradeStatus.CLOSED
+            
+            # Save to database
+            strategy.db.update_trade(trade)
+            
+            # Remove from open trades
+            with strategy._lock:
+                strategy.open_trades = [t for t in strategy.open_trades if t.trade_id != trade.trade_id]
+            
+            pnl_emoji = "📈 +" if pnl >= 0 else "📉 "
+            logger.info(
+                f"\n{'◀'*3} POSITION CLEARED (BOOKED) {'◀'*3}\n"
+                f"   Symbol: {trade.symbol} P{trade.position_number}\n"
+                f"   Entry: ₹{trade.entry_price:.2f} | Exit: ₹{exit_price:.2f}\n"
+                f"   PnL: {pnl_emoji}₹{pnl:+,.2f} ({pnl_pct:+.2f}%)\n"
+                f"   Remaining Positions: {strategy.get_position_count()}/{MAX_POSITIONS}"
+            )
+            
+            return jsonify({
+                "status": "cleared",
+                "symbol": trade.symbol,
+                "exit_price": float(exit_price),
+                "pnl": float(pnl),
+                "pnl_pct": float(pnl_pct)
+            })
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+    
+    @app.route('/api/strategy/momentum/reset', methods=['POST'])
+    def api_momentum_reset_all():
+        """
+        Close all open positions and reset strategy (PAPER MODE ONLY).
+        This clears the order book and starts with zero positions.
+        """
+        try:
+            strategy = get_strategy()
+            
+            # Only allow in PAPER mode
+            if strategy.broker.mode != 'PAPER':
+                return jsonify({
+                    "error": "Reset is only allowed in PAPER trading mode for safety"
+                }), 403
+            
+            # Get all open trades
+            open_trades_copy = list(strategy.open_trades)
+            closed_count = 0
+            failed_count = 0
+            
+            logger.info(f"\n{'='*60}")
+            logger.info(f"RESETTING STRATEGY - Closing {len(open_trades_copy)} open position(s)")
+            logger.info(f"{'='*60}")
+            
+            # Close each position
+            for trade in open_trades_copy:
+                try:
+                    strategy.close_position(trade, "Strategy Reset - Close All")
+                    closed_count += 1
+                except Exception as e:
+                    logger.error(f"Failed to close {trade.symbol} P{trade.position_number}: {str(e)}")
+                    failed_count += 1
+            
+            # Clear the open trades list (ensure it's empty)
+            with strategy._lock:
+                strategy.open_trades = []
+            
+            # Reset any pending order state (if these attributes exist)
+            if hasattr(strategy, 'pending_positions'):
+                strategy.pending_positions = {}
+            if hasattr(strategy, 'symbol_entry_state'):
+                strategy.symbol_entry_state = {}
+            if hasattr(strategy, 'traded_today_symbols'):
+                strategy.traded_today_symbols = set()
+            
+            # Reset timing
+            strategy._last_scan_time = None
+            
+            logger.info(f"Strategy Reset Complete:")
+            logger.info(f"  - Positions Closed: {closed_count}")
+            logger.info(f"  - Failed to Close: {failed_count}")
+            logger.info(f"  - Open Trades Remaining: {len(strategy.open_trades)}")
+            logger.info(f"{'='*60}\n")
+            
+            # DEBUG: Verify status after reset
+            status = strategy.get_status()
+            logger.info(f"DEBUG: After reset, open_trades in status: {len(status.get('open_trades', []))} items")
+            
+            return jsonify({
+                "status": "reset",
+                "closed": closed_count,
+                "failed": failed_count,
+                "message": f"Strategy reset complete. Closed {closed_count} position(s)."
+            })
+        
+        except Exception as e:
+            logger.error(f"Error during reset: {str(e)}")
             return jsonify({"error": str(e)}), 500
     
     logger.info("Strategy routes registered with Flask app")

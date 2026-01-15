@@ -62,13 +62,39 @@ def load_dotenv(path: str):
 load_dotenv(os.path.join(REPO_ROOT, '.env'))
 
 # -------------------------------------------------------------------
-# Imports from local packages
+# Configure logging BEFORE importing any modules (especially app)
+# -------------------------------------------------------------------
+# Set up basic logging configuration
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+
+# Suppress verbose library logs
+logging.getLogger('urllib3').setLevel(logging.WARNING)
+logging.getLogger('kiteconnect').setLevel(logging.WARNING)
+logging.getLogger('werkzeug').setLevel(logging.WARNING)
+
+# Completely disable flask_limiter loggers by using NullHandler
+flask_limiter_logger = logging.getLogger('flask_limiter')
+flask_limiter_logger.handlers = []
+flask_limiter_logger.addHandler(logging.NullHandler())
+flask_limiter_logger.propagate = False
+
+flask_limiter_errors_logger = logging.getLogger('flask_limiter.errors')
+flask_limiter_errors_logger.handlers = []
+flask_limiter_errors_logger.addHandler(logging.NullHandler())
+flask_limiter_errors_logger.propagate = False
+
+# -------------------------------------------------------------------
+# Imports from local packages (AFTER logging is configured)
 # -------------------------------------------------------------------
 import yaml
 from kiteconnect import KiteConnect, KiteTicker
 from pgAdmin_database.db_connection import pg_cursor, test_connection
 
-# Import Flask app and ltp_service
+# Import Flask app and ltp_service (now that logging is set up)
 from app import app  # Flask app instance
 import ltp_service  # For populating caches with real-time data
 
@@ -417,16 +443,8 @@ def run(
         port: Flask port
         scanner_interval: Scanner refresh interval in seconds
     """
-    # Configure logging
-    logging.basicConfig(
-        level=getattr(logging, log_level.upper(), logging.INFO),
-        format='%(asctime)s [%(levelname)s] %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
-    )
-    
-    # Suppress verbose library logs
-    logging.getLogger('urllib3').setLevel(logging.WARNING)
-    logging.getLogger('kiteconnect').setLevel(logging.WARNING)
+    # Adjust logging level if specified (logging is already configured at module level)
+    logging.getLogger().setLevel(getattr(logging, log_level.upper(), logging.INFO))
     
     logging.info("=" * 60)
     logging.info("Pure Alpha Trading Webapp - Starting...")

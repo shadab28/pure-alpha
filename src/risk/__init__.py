@@ -16,8 +16,6 @@ Rank_GM with Acceleration:
   • Geometric mean combining 15m momentum + daily trend
   • Momentum acceleration detection (early breakout catch)
   • Final Score = Rank_GM + 0.3 × Acceleration
-  • Improves P0/P1 win rate by 9-15%
-  • Reduces max drawdown by 25-30%
 
 Usage:
   # Position sizing

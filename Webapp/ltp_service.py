@@ -48,6 +48,15 @@ except Exception:
     pg_cursor = None  # type: ignore
     test_connection = lambda: False  # type: ignore
 
+# Setup logger (INFO level to reduce noise)
+logger = logging.getLogger("ltp_service")
+logger.setLevel(logging.INFO)
+if not logger.handlers:
+    handler = logging.StreamHandler()
+    formatter = logging.Formatter('%(asctime)s [LTP_SERVICE] %(levelname)s: %(message)s')
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+
 # Caches
 _daily_ma_cache: Dict[str, Dict[str, Any]] = {}
 _daily_ma_lock = threading.RLock()
@@ -61,6 +70,12 @@ _last15m_close_cache: Dict[str, float] = {}
 _rsi15m_cache: Dict[str, float] = {}
 _sma15m_last_ts: Optional[datetime] = None
 _sma15m_lock = threading.RLock()
+
+# LTP API Request Caching (2-second TTL to prevent rate limiting)
+_ltp_cache: Dict[str, Any] = {}
+_ltp_cache_ts: Optional[datetime] = None
+_ltp_cache_lock = threading.RLock()
+_LTP_CACHE_TTL = 2  # seconds
 
 # Daily volume ratio cache: avg(5d volume) / avg(200d volume)
 _volratio_cache: Dict[str, float] = {}
@@ -1095,11 +1110,24 @@ def fetch_ltp() -> Dict[str, Any]:
 
     Heavy daily MA computations are performed in a background thread and cached.
     15m SMA200 computed from Postgres table `ohlcv_data` if available.
+    
+    Includes request caching to prevent hitting Zerodha API rate limits.
     """
+    global _ltp_cache, _ltp_cache_ts
+    
+    # Check if cache is still valid
+    with _ltp_cache_lock:
+        if _ltp_cache_ts and (datetime.now() - _ltp_cache_ts).total_seconds() < _LTP_CACHE_TTL:
+            return _ltp_cache.copy()
+    
     params = load_params()
     universe_name = params.get("universe_list", "allstocks")
     symbols = load_symbol_list(universe_name)
     kite = get_kite()
+    
+    # Set longer timeout IMMEDIATELY to prevent timeout errors across all Kite API calls
+    kite.timeout = 30
+    
     instruments = build_ltp_query(symbols)
 
     # Instrument token mapping for daily MAs
@@ -1117,10 +1145,30 @@ def fetch_ltp() -> Dict[str, Any]:
     _refresh_sr_if_needed(symbols)
     _refresh_vcp_if_needed(symbols)
 
-    try:
-        quote_data = kite.quote(list(instruments.values())) 
-    except Exception as e:
-        raise RuntimeError(f"Quote API failed: {e}")
+    # Fetch quotes with retry logic for timeout issues
+    quote_data = None
+    max_retries = 3
+    retry_delay = 1  # seconds
+    
+    for attempt in range(max_retries):
+        try:
+            quote_data = kite.quote(list(instruments.values())) 
+            break  # Success, exit retry loop
+        except Exception as e:
+            error_msg = str(e)
+            if "Read timed out" in error_msg or "timeout" in error_msg.lower():
+                if attempt < max_retries - 1:
+                    wait_time = retry_delay * (attempt + 1)  # Exponential backoff
+                    logger.warning(f"Quote API timeout (attempt {attempt + 1}/{max_retries}), retrying in {wait_time}s: {error_msg}")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    logger.error(f"Quote API failed after {max_retries} retries: {error_msg}")
+                    raise RuntimeError(f"Quote API failed after {max_retries} retries: {error_msg}")
+            else:
+                # Non-timeout error, don't retry
+                logger.error(f"Quote API failed (non-timeout): {error_msg}")
+                raise RuntimeError(f"Quote API failed: {error_msg}")
 
     out: Dict[str, Any] = {}
     with _daily_ma_lock:
@@ -1242,7 +1290,14 @@ def fetch_ltp() -> Dict[str, Any]:
         "sma15m_last_refresh": _sma15m_last_ts.isoformat() if _sma15m_last_ts else None,
         "missing_last_close_15m": missing_last_close,
     }
-    return {"universe": universe_name, "count": len(symbols), "meta": meta, "data": out}
+    result = {"universe": universe_name, "count": len(symbols), "meta": meta, "data": out}
+    
+    # Cache the result to prevent rate limiting on rapid successive requests
+    with _ltp_cache_lock:
+        _ltp_cache = result.copy()
+        _ltp_cache_ts = datetime.now()
+    
+    return result
 
 
 def get_ck_data() -> Dict[str, Any]:

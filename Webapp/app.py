@@ -4,12 +4,15 @@ from __future__ import annotations
 import os
 import sys
 import logging
+
+# Import will happen AFTER main.py configures logging, so we don't need to configure here
+# Just ensure werkzeug doesn't log too much
+logging.getLogger("werkzeug").setLevel(logging.WARNING)
+
 from flask import Flask, jsonify, render_template, Response, request
 import time
 import threading
 import json
-from flask_limiter import Limiter
-from flask_limiter.util import get_remote_address
 
 # Allow direct execution without treating Webapp as a package
 CURRENT_DIR = os.path.dirname(__file__)
@@ -132,18 +135,15 @@ app.config['PERMANENT_SESSION_LIFETIME'] = 3600  # 1 hour session
 app = init_auth(app)
 app = init_csrf(app)
 
-# -------- Rate Limiting Setup --------
-# Initialize rate limiter for trading endpoints (suppress info logs)
-limiter = Limiter(
-	app=app,
-	key_func=get_remote_address,
-	default_limits=["200 per day", "50 per hour"],
-	storage_uri="memory://",
-	in_memory_fallback_enabled=True
-)
+# -------- Rate Limiting (DISABLED) --------
+# Dummy limiter - decorators do nothing
+class DummyLimiter:
+	def limit(self, *args, **kwargs):
+		def decorator(f):
+			return f
+		return decorator
 
-# Suppress flask-limiter INFO logs (rate limit exceeded messages)
-logging.getLogger("flask_limiter").setLevel(logging.WARNING)
+limiter = DummyLimiter()
 
 # -------- Logging setup (date-wise subfolders) --------
 LOG_BASE_DIR = os.path.join(REPO_ROOT, 'logs')
