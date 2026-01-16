@@ -102,8 +102,8 @@ Result: **Early entries on rising momentum** 😊
 Combines 15-minute momentum with daily trend:
 ```
 Rank_GM = (√(g1 × g2) - 1) × 100
-where g1 = 1 + (pct_vs_15m_sma200 / 100)
-      g2 = 1 + (pct_vs_daily_sma50 / 100)
+where g1 = 1 + (pct_vs_15m_sma50 / 100)
+  g2 = 1 + (pct_vs_daily_sma20 / 100)
 ```
 
 **Why Geometric Mean?**
@@ -204,8 +204,8 @@ from src.ranking import rank_stock
 # Rank a single stock
 result = rank_stock(
     symbol="RELIANCE",
-    pct_vs_15m_sma200=8.0,      # +8% above 15m SMA200
-    pct_vs_daily_sma50=5.0,     # +5% above daily SMA50
+  pct_vs_15m_sma50=8.0,      # +8% above 15m SMA50
+  pct_vs_daily_sma20=5.0,     # +5% above daily SMA20
     rank_gm_previous=3.97       # Previous GM (15 min ago)
 )
 
@@ -219,8 +219,8 @@ if result["passes_filter"]:     # Rank_Final > 2.5
 from src.ranking import rank_multiple
 
 stocks = [
-    {"symbol": "RELIANCE", "pct_vs_15m_sma200": 8.0, "pct_vs_daily_sma50": 5.0, "rank_gm_previous": 3.97},
-    {"symbol": "TCS", "pct_vs_15m_sma200": 3.0, "pct_vs_daily_sma50": 2.0, "rank_gm_previous": 2.5},
+  {"symbol": "RELIANCE", "pct_vs_15m_sma50": 8.0, "pct_vs_daily_sma20": 5.0, "rank_gm_previous": 3.97},
+  {"symbol": "TCS", "pct_vs_15m_sma50": 3.0, "pct_vs_daily_sma20": 2.0, "rank_gm_previous": 2.5},
 ]
 
 ranked = rank_multiple(stocks)

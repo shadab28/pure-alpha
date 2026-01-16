@@ -27,7 +27,7 @@ from src.ranking import (
 
 | Function | Purpose | Input | Output |
 |----------|---------|-------|--------|
-| `calculate_rank_gm()` | Geometric mean of technical indicators | pct_vs_15m_sma200, pct_vs_daily_sma50 | Rank_GM score |
+| `calculate_rank_gm()` | Geometric mean of technical indicators | pct_vs_15m_sma50, pct_vs_daily_sma20 | Rank_GM score |
 | `calculate_acceleration()` | Momentum change (GM current - GM previous) | rank_gm_current, rank_gm_previous | Acceleration |
 | `calculate_rank_final()` | Combined score with acceleration | rank_gm, acceleration, accel_weight | Final score |
 | `rank_stock()` | Complete ranking (all-in-one) | symbol, percentages, previous GM | Full result dict |
@@ -40,8 +40,8 @@ from src.ranking import (
 ### Step 1: Calculate Rank_GM (Geometric Mean)
 
 ```
-g1 = 1 + (pct_vs_15m_sma200 / 100)
-g2 = 1 + (pct_vs_daily_sma50 / 100)
+g1 = 1 + (pct_vs_15m_sma50 / 100)
+g2 = 1 + (pct_vs_daily_sma20 / 100)
 Rank_GM = (√(g1 × g2) - 1) × 100
 ```
 
@@ -83,8 +83,8 @@ from src.ranking import rank_stock
 
 result = rank_stock(
     symbol="RELIANCE",
-    pct_vs_15m_sma200=8.0,      # +8% above 15m SMA200
-    pct_vs_daily_sma50=5.0,     # +5% above daily SMA50
+    pct_vs_15m_sma50=8.0,      # +8% above 15m SMA50
+    pct_vs_daily_sma20=5.0,     # +5% above daily SMA20
     rank_gm_previous=3.97       # Previous GM from 15 min ago
 )
 
@@ -109,20 +109,20 @@ from src.ranking import rank_multiple
 stocks = [
     {
         "symbol": "RELIANCE",
-        "pct_vs_15m_sma200": 8.0,
-        "pct_vs_daily_sma50": 5.0,
+    "pct_vs_15m_sma50": 8.0,
+    "pct_vs_daily_sma20": 5.0,
         "rank_gm_previous": 3.97
     },
     {
         "symbol": "TCS",
-        "pct_vs_15m_sma200": 3.0,
-        "pct_vs_daily_sma50": 2.0,
+    "pct_vs_15m_sma50": 3.0,
+    "pct_vs_daily_sma20": 2.0,
         "rank_gm_previous": 2.5
     },
     {
         "symbol": "INFY",
-        "pct_vs_15m_sma200": -2.0,
-        "pct_vs_daily_sma50": -1.0
+    "pct_vs_15m_sma50": -2.0,
+    "pct_vs_daily_sma20": -1.0
     }
 ]
 
@@ -190,8 +190,8 @@ class RankingScanner:
             # Rank with acceleration
             result = rank_stock(
                 symbol=symbol,
-                pct_vs_15m_sma200=pct_15m,
-                pct_vs_daily_sma50=pct_daily,
+                pct_vs_15m_sma50=pct_15m,
+                pct_vs_daily_sma20=pct_daily,
                 rank_gm_previous=rank_gm_prev,
                 min_threshold=2.5
             )
@@ -228,8 +228,8 @@ def place_order_if_eligible(symbol, price, atr, sma200_15m, sma50_daily):
     # Calculate rank with acceleration
     result = rank_stock(
         symbol=symbol,
-        pct_vs_15m_sma200=pct_15m,
-        pct_vs_daily_sma50=pct_daily,
+    pct_vs_15m_sma50=pct_15m,
+    pct_vs_daily_sma20=pct_daily,
         rank_gm_previous=rank_gm_prev,
         min_threshold=2.5
     )
@@ -280,8 +280,8 @@ ACCEL_WEIGHT = 0.3       # Acceleration weighting (0.3 = 30% impact)
 ```python
 rank_stock(
     symbol=symbol,
-    pct_vs_15m_sma200=pct_15m,
-    pct_vs_daily_sma50=pct_daily,
+    pct_vs_15m_sma50=pct_15m,
+    pct_vs_daily_sma20=pct_daily,
     rank_gm_previous=rank_gm_prev,
     min_threshold=3.0,      # Higher threshold
     accel_weight=0.2        # Less acceleration weight
@@ -292,8 +292,8 @@ rank_stock(
 ```python
 rank_stock(
     symbol=symbol,
-    pct_vs_15m_sma200=pct_15m,
-    pct_vs_daily_sma50=pct_daily,
+    pct_vs_15m_sma50=pct_15m,
+    pct_vs_daily_sma20=pct_daily,
     rank_gm_previous=rank_gm_prev,
     min_threshold=2.0,      # Lower threshold
     accel_weight=0.4        # More acceleration weight
@@ -341,8 +341,8 @@ Price:                ₹3,040
 15m SMA200:          ₹3,053
 Daily SMA50:         ₹3,000
 
-pct_vs_15m_sma200:   -0.43%
-pct_vs_daily_sma50:  +1.33%
+pct_vs_15m_sma50:   -0.43%
+pct_vs_daily_sma20:  +1.33%
 
 Rank_GM = (√(0.9957 × 1.0133) - 1) × 100 = 0.45% (weak)
 Rank_Final = 0.45 (fails filter ❌ - skip)
@@ -355,8 +355,8 @@ Price:                ₹3,085
 15m SMA200:          ₹3,053
 Daily SMA50:         ₹3,040
 
-pct_vs_15m_sma200:   +1.05%
-pct_vs_daily_sma50:  +1.48%
+pct_vs_15m_sma50:   +1.05%
+pct_vs_daily_sma20:  +1.48%
 
 Rank_GM = 2.76%
 Acceleration = 2.76 - 0.45 = +2.31

@@ -31,8 +31,8 @@ Purpose: Combines 15m momentum and daily trend into single ranking score
 Formula:
 ┌──────────────────────────────────────────────────────────────────────────┐
 │                                                                          │
-│   g1 = 1 + (pct_vs_15m_sma200 / 100)                                    │
-│   g2 = 1 + (pct_vs_daily_sma50 / 100)                                   │
+│   g1 = 1 + (pct_vs_15m_sma50 / 100)                                     │
+│   g2 = 1 + (pct_vs_daily_sma20 / 100)                                   │
 │                                                                          │
 │   Rank_GM = ((g1 × g2)^0.5 - 1) × 100                                   │
 │                                                                          │
@@ -41,11 +41,11 @@ Formula:
 └──────────────────────────────────────────────────────────────────────────┘
 
 Where:
-  • pct_vs_15m_sma200 = ((LTP - SMA200_15m) / SMA200_15m) × 100
-  • pct_vs_daily_sma50 = ((LTP - SMA50_daily) / SMA50_daily) × 100
+  • pct_vs_15m_sma50 = ((LTP - SMA50_15m) / SMA50_15m) × 100
+  • pct_vs_daily_sma20 = ((LTP - SMA20_daily) / SMA20_daily) × 100
 
 Example:
-  If pct_vs_15m_sma200 = +8% and pct_vs_daily_sma50 = +5%:
+  If pct_vs_15m_sma50 = +8% and pct_vs_daily_sma20 = +5%:
   g1 = 1.08, g2 = 1.05
   Rank_GM = (√(1.08 × 1.05) - 1) × 100 = (√1.134 - 1) × 100 = 6.48%
 
@@ -63,7 +63,7 @@ TRADING THRESHOLD:
 Formula:
 ┌──────────────────────────────────────────────────────────────────────────┐
 │                                                                          │
-│   pct_vs_15m_sma200 = ((Last_Price - SMA200_15m) / SMA200_15m) × 100    │
+│   pct_vs_15m_sma50 = ((Last_Price - SMA50_15m) / SMA50_15m) × 100    │
 │                                                                          │
 └──────────────────────────────────────────────────────────────────────────┘
 
@@ -79,7 +79,7 @@ Interpretation:
 Formula:
 ┌──────────────────────────────────────────────────────────────────────────┐
 │                                                                          │
-│   pct_vs_daily_sma50 = ((Last_Price - SMA50_daily) / SMA50_daily) × 100 │
+│   pct_vs_daily_sma20 = ((Last_Price - SMA20_daily) / SMA20_daily) × 100 │
 │                                                                          │
 └──────────────────────────────────────────────────────────────────────────┘
 
@@ -208,7 +208,7 @@ Configuration:
 │                                                                          │
 │   TOTAL_STRATEGY_CAPITAL = ₹90,000                                      │
 │   CAPITAL_PER_POSITION = ₹3,000                                         │
-│   MAX_POSITIONS = 30                                                     │
+│   MAX_POSITIONS = 33                                                     │
 │                                                                          │
 └──────────────────────────────────────────────────────────────────────────┘
 

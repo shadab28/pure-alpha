@@ -1156,11 +1156,11 @@ def export_ltp_csv():
 	try:
 		data = fetch_ltp()
 		rows = [
-			"symbol,last_price,last_close_15m,sma200_15m,sma50_15m,ratio_15m_50_200,rank_gm,pct_vs_15m_sma200,pct_vs_daily_sma50,drawdown_15m_200_pct,days_since_golden_cross,daily_sma50,daily_sma200,daily_ratio_50_200,volume_ratio_d5_d200"
+			"symbol,last_price,last_close_15m,sma200_15m,sma50_15m,ratio_15m_50_200,rank_gm,pct_vs_15m_sma50,pct_vs_daily_sma20,drawdown_15m_200_pct,days_since_golden_cross,daily_sma20,daily_sma50,daily_sma200,daily_ratio_50_200,volume_ratio_d5_d200"
 		]
 		for sym, info in data.get("data", {}).items():
 			rows.append(
-				f"{sym},{info.get('last_price','')},{info.get('last_close','')},{info.get('sma200_15m','')},{info.get('sma50_15m','')},{info.get('ratio_15m_50_200','')},{info.get('rank_gm','')},{info.get('pct_vs_15m_sma200','')},{info.get('pct_vs_daily_sma50','')},{info.get('drawdown_15m_200_pct','')},{info.get('days_since_golden_cross','')},{info.get('daily_sma50','')},{info.get('daily_sma200','')},{info.get('daily_ratio_50_200','')},{info.get('volume_ratio_d5_d200','')}"
+				f"{sym},{info.get('last_price','')},{info.get('last_close','')},{info.get('sma200_15m','')},{info.get('sma50_15m','')},{info.get('ratio_15m_50_200','')},{info.get('rank_gm','')},{info.get('pct_vs_15m_sma50','')},{info.get('pct_vs_daily_sma20','')},{info.get('drawdown_15m_200_pct','')},{info.get('days_since_golden_cross','')},{info.get('daily_sma20','')},{info.get('daily_sma50','')},{info.get('daily_sma200','')},{info.get('volume_ratio_d5_d200','')}"
 			)
 		csv_content = "\n".join(rows) + "\n"
 		return Response(csv_content, mimetype="text/csv", headers={

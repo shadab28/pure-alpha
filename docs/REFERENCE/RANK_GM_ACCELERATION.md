@@ -15,14 +15,14 @@
 Combines 15-minute momentum with daily trend:
 
 ```
-g1 = 1 + (pct_vs_15m_sma200 / 100)
-g2 = 1 + (pct_vs_daily_sma50 / 100)
+g1 = 1 + (pct_vs_15m_sma50 / 100)
+g2 = 1 + (pct_vs_daily_sma20 / 100)
 Rank_GM = (√(g1 × g2) - 1) × 100
 ```
 
 **Where:**
-- `pct_vs_15m_sma200` = Price % above/below 15m SMA200 (short-term momentum)
-- `pct_vs_daily_sma50` = Price % above/below daily SMA50 (medium-term trend)
+- `pct_vs_15m_sma50` = Price % above/below 15m SMA50 (short-term momentum)
+- `pct_vs_daily_sma20` = Price % above/below daily SMA20 (medium-term trend)
 
 **Why Geometric Mean?**
 - Captures **multiplicative** relationship between indicators
@@ -125,8 +125,8 @@ from src.ranking import rank_stock
 
 result = rank_stock(
     symbol="RELIANCE",
-    pct_vs_15m_sma200=8.0,
-    pct_vs_daily_sma50=5.0,
+    pct_vs_15m_sma50=8.0,
+    pct_vs_daily_sma20=5.0,
     rank_gm_previous=3.97,  # Previous Rank_GM from 15 min ago
     min_threshold=2.5,
     accel_weight=0.3
@@ -152,20 +152,20 @@ from src.ranking import rank_multiple
 stocks = [
     {
         "symbol": "RELIANCE",
-        "pct_vs_15m_sma200": 8.0,
-        "pct_vs_daily_sma50": 5.0,
+    "pct_vs_15m_sma50": 8.0,
+    "pct_vs_daily_sma20": 5.0,
         "rank_gm_previous": 3.97
     },
     {
         "symbol": "TCS",
-        "pct_vs_15m_sma200": 3.0,
-        "pct_vs_daily_sma50": 2.0,
+    "pct_vs_15m_sma50": 3.0,
+    "pct_vs_daily_sma20": 2.0,
         "rank_gm_previous": 2.5
     },
     {
         "symbol": "INFY",
-        "pct_vs_15m_sma200": -2.0,
-        "pct_vs_daily_sma50": -1.0
+    "pct_vs_15m_sma50": -2.0,
+    "pct_vs_daily_sma20": -1.0
     }
 ]
 
@@ -235,8 +235,8 @@ Price                  ₹3,085
 15m SMA200            ₹3,053 (+1.05%)
 Daily SMA50           ₹3,040 (+1.48%)
 
-pct_vs_15m_sma200     +1.05%
-pct_vs_daily_sma50    +1.48%
+pct_vs_15m_sma50     +1.05%
+pct_vs_daily_sma20    +1.48%
 
 Rank_GM = √(1.0105 × 1.0148) - 1 = 2.76%
 (Below threshold, weak signal)
@@ -249,8 +249,8 @@ Price                  ₹3,120
 15m SMA200            ₹3,053 (+2.19%)
 Daily SMA50           ₹3,040 (+2.63%)
 
-pct_vs_15m_sma200     +2.19%
-pct_vs_daily_sma50    +2.63%
+pct_vs_15m_sma50     +2.19%
+pct_vs_daily_sma20    +2.63%
 
 Rank_GM = √(1.0219 × 1.0263) - 1 = 5.41%
 Acceleration = 5.41 - 2.76 = +2.65%
@@ -308,8 +308,8 @@ for symbol in watchlist:
     # Calculate new rank with acceleration
     result = rank_stock(
         symbol=symbol,
-        pct_vs_15m_sma200=pct_15m,
-        pct_vs_daily_sma50=pct_daily,
+    pct_vs_15m_sma50=pct_15m,
+    pct_vs_daily_sma20=pct_daily,
         rank_gm_previous=rank_gm_prev
     )
     

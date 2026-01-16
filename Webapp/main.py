@@ -460,36 +460,45 @@ def run(
     symbols_msg = Colors.bold_green(f"Loaded {len(symbols)} symbols from {universe_name}")
     logging.info(symbols_msg)
     
-    # Get Kite API credentials
+    # Get Kite API credentials (optional)
     api_key = os.getenv("KITE_API_KEY")
+    no_kite_mode = False
     if not api_key:
-        raise RuntimeError("KITE_API_KEY env not set. Add to .env or export.")
-    
-    if not os.path.exists(TOKEN_PATH):
-        raise RuntimeError("Access token file missing. Run Core_files/auth.py to generate token.txt.")
-    
-    with open(TOKEN_PATH, "r") as f:
-        access_token = f.read().strip()
-    
-    # Initialize Kite
-    kite = KiteConnect(api_key=api_key)
-    kite.set_access_token(access_token)
-    kite_msg = Colors.bold_green("Kite API initialized")
-    logging.info(kite_msg)
-    
-    # Ensure instruments CSV exists
-    ensure_instruments_csv(kite, INSTRUMENTS_CSV)
-    
-    # Load token mappings
-    sym_to_token = load_instrument_tokens(INSTRUMENTS_CSV)
-    tokens, token_to_sym = resolve_universe(symbols, sym_to_token)
-    
-    if not tokens:
-        raise SystemExit("No tokens resolved for the selected universe. Check instruments CSV and symbols.")
-    
-    tokens_msg = Colors.bold_green(f"Resolved {len(tokens)} tokens for subscription")
-    tokens_msg = f"Resolved {Colors.bold_green(len(tokens))} tokens for subscription"
-    logging.info(tokens_msg)
+        logging.warning("KITE_API_KEY env not set — starting in NO-KITE mode (Flask + scanners only).")
+        no_kite_mode = True
+
+    sym_to_token = {}
+    tokens = []
+    token_to_sym = {}
+
+    if not no_kite_mode:
+        if not os.path.exists(TOKEN_PATH):
+            raise RuntimeError("Access token file missing. Run Core_files/auth.py to generate token.txt.")
+
+        with open(TOKEN_PATH, "r") as f:
+            access_token = f.read().strip()
+
+        # Initialize Kite
+        kite = KiteConnect(api_key=api_key)
+        kite.set_access_token(access_token)
+        kite_msg = Colors.bold_green("Kite API initialized")
+        logging.info(kite_msg)
+
+        # Ensure instruments CSV exists
+        ensure_instruments_csv(kite, INSTRUMENTS_CSV)
+
+        # Load token mappings
+        sym_to_token = load_instrument_tokens(INSTRUMENTS_CSV)
+        tokens, token_to_sym = resolve_universe(symbols, sym_to_token)
+
+        if not tokens:
+            raise SystemExit("No tokens resolved for the selected universe. Check instruments CSV and symbols.")
+
+        tokens_msg = Colors.bold_green(f"Resolved {len(tokens)} tokens for subscription")
+        tokens_msg = f"Resolved {Colors.bold_green(len(tokens))} tokens for subscription"
+        logging.info(tokens_msg)
+    else:
+        logging.info("Running in NO-KITE mode: ticker and live subscriptions disabled.")
     
     # Ensure database table
     ensure_ohlcv_table()
@@ -542,16 +551,17 @@ def run(
     def on_error(ws, code, reason):
         logging.error("Ticker error: %s %s", code, reason)
     
-    # Start KiteTicker
-    kws = KiteTicker(api_key, access_token, debug=False)
-    kws.on_ticks = on_ticks
-    kws.on_connect = on_connect
-    kws.on_close = on_close
-    kws.on_error = on_error
-    kws.connect(threaded=True)
-    
-    kws_msg = Colors.bold_green("KiteTicker connected in threaded mode")
-    logging.info(kws_msg)
+    # Start KiteTicker (only when Kite credentials are present)
+    if not no_kite_mode:
+        kws = KiteTicker(api_key, access_token, debug=False)
+        kws.on_ticks = on_ticks
+        kws.on_connect = on_connect
+        kws.on_close = on_close
+        kws.on_error = on_error
+        kws.connect(threaded=True)
+
+        kws_msg = Colors.bold_green("KiteTicker connected in threaded mode")
+        logging.info(kws_msg)
     
     # -------------------------------------------------------------------
     # Main monitoring loop
@@ -604,10 +614,11 @@ def run(
     
     except KeyboardInterrupt:
         logging.info("Interrupted; shutting down...")
-        try:
-            kws.stop()
-        except Exception:
-            pass
+        if not no_kite_mode:
+            try:
+                kws.stop()
+            except Exception:
+                pass
         logging.info("Shutdown complete.")
 
 

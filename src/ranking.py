@@ -28,8 +28,8 @@ class RankMetrics:
     """Container for ranking metrics and scores."""
     symbol: str
     timestamp: datetime
-    price_15m_sma200: float  # Percentage vs 15m SMA200
-    price_daily_sma50: float  # Percentage vs daily SMA50
+    price_15m_sma50: float  # Percentage vs 15m SMA50
+    price_daily_sma20: float  # Percentage vs daily SMA20
     rank_gm: float  # Geometric mean score
     rank_gm_prev: Optional[float] = None  # Previous Rank_GM (15 min ago)
     acceleration: Optional[float] = None  # Momentum acceleration
@@ -49,8 +49,8 @@ class RankMetrics:
 # ============================================================================
 
 def calculate_rank_gm(
-    pct_vs_15m_sma200: float,
-    pct_vs_daily_sma50: float
+    pct_vs_15m_sma50: float,
+    pct_vs_daily_sma20: float
 ) -> float:
     """
     Calculate Rank_GM (Geometric Mean Ranking Metric).
@@ -58,47 +58,47 @@ def calculate_rank_gm(
     Combines 15-minute momentum and daily trend into a single score.
     
     Formula:
-        g1 = 1 + (pct_vs_15m_sma200 / 100)
-        g2 = 1 + (pct_vs_daily_sma50 / 100)
+        g1 = 1 + (pct_vs_15m_sma50 / 100)
+        g2 = 1 + (pct_vs_daily_sma20 / 100)
         Rank_GM = (√(g1 × g2) - 1) × 100
     
     Args:
-        pct_vs_15m_sma200: Price percentage above/below 15m SMA200
-        pct_vs_daily_sma50: Price percentage above/below daily SMA50
+        pct_vs_15m_sma50: Price percentage above/below 15m SMA50
+        pct_vs_daily_sma20: Price percentage above/below daily SMA20
     
     Returns:
         Rank_GM score (positive = bullish, negative = bearish)
     
     Example:
-        >>> calculate_rank_gm(8.0, 5.0)  # +8% vs 15m SMA200, +5% vs daily SMA50
-        6.48  # Positive momentum
+    >>> calculate_rank_gm(8.0, 5.0)  # +8% vs 15m SMA50, +5% vs daily SMA20
+    6.48  # Positive momentum
         
         >>> calculate_rank_gm(-3.0, -2.0)  # Below both averages
         -2.49  # Bearish
     """
     try:
         # Prevent division by zero and extreme values
-        if pct_vs_15m_sma200 <= -100 or pct_vs_daily_sma50 <= -100:
+        if pct_vs_15m_sma50 <= -100 or pct_vs_daily_sma20 <= -100:
             logger.warning(
                 "Invalid percentages: 15m=%s, daily=%s",
-                pct_vs_15m_sma200, pct_vs_daily_sma50
+                pct_vs_15m_sma50, pct_vs_daily_sma20
             )
             return 0.0
-        
+
         # Geometric mean calculation
-        g1 = 1 + (pct_vs_15m_sma200 / 100)
-        g2 = 1 + (pct_vs_daily_sma50 / 100)
-        
+        g1 = 1 + (pct_vs_15m_sma50 / 100)
+        g2 = 1 + (pct_vs_daily_sma20 / 100)
+
         # Avoid negative square root
         product = g1 * g2
         if product < 0:
             return 0.0
-        
+
         # √(g1 × g2) - 1
         rank_gm = ((product ** 0.5) - 1) * 100
-        
+
         return round(rank_gm, 2)
-        
+
     except Exception as e:
         logger.error("Error calculating Rank_GM: %s", e)
         return 0.0
@@ -192,8 +192,8 @@ def calculate_rank_final(
 
 def rank_stock(
     symbol: str,
-    pct_vs_15m_sma200: float,
-    pct_vs_daily_sma50: float,
+    pct_vs_15m_sma50: float,
+    pct_vs_daily_sma20: float,
     rank_gm_previous: Optional[float] = None,
     min_threshold: float = 2.5,
     accel_weight: float = 0.3
@@ -205,8 +205,8 @@ def rank_stock(
     
     Args:
         symbol: Stock ticker symbol
-        pct_vs_15m_sma200: Price % above/below 15m SMA200
-        pct_vs_daily_sma50: Price % above/below daily SMA50
+        pct_vs_15m_sma50: Price % above/below 15m SMA50
+        pct_vs_daily_sma20: Price % above/below daily SMA20
         rank_gm_previous: Previous Rank_GM for acceleration calc
         min_threshold: Minimum score to pass filter (default: 2.5)
         accel_weight: Acceleration weighting (default: 0.3)
@@ -234,15 +234,15 @@ def rank_stock(
         }
     """
     try:
-        # Calculate base Rank_GM
-        rank_gm = calculate_rank_gm(pct_vs_15m_sma200, pct_vs_daily_sma50)
-        
+        # Calculate base Rank_GM (using 15m SMA50 and daily SMA20)
+        rank_gm = calculate_rank_gm(pct_vs_15m_sma50, pct_vs_daily_sma20)
+
         # Calculate acceleration if previous data available
         acceleration = calculate_acceleration(rank_gm, rank_gm_previous)
-        
+
         # Calculate final rank
         rank_final = calculate_rank_final(rank_gm, acceleration, accel_weight)
-        
+
         # Determine strength
         if rank_final > 5.0:
             strength = "bullish"
@@ -250,10 +250,10 @@ def rank_stock(
             strength = "bearish"
         else:
             strength = "neutral"
-        
+
         # Check if passes minimum threshold
         passes_filter = rank_final > min_threshold
-        
+
         result = {
             "symbol": symbol,
             "rank_gm": rank_gm,
@@ -263,14 +263,14 @@ def rank_stock(
             "strength": strength,
             "timestamp": datetime.now().isoformat(),
         }
-        
+
         logger.info(
             "Ranked %s: GM=%.2f, Accel=%.2f, Final=%.2f, Pass=%s",
             symbol, rank_gm, acceleration or 0, rank_final, passes_filter
         )
-        
+
         return result
-        
+
     except Exception as e:
         logger.error("Error ranking stock %s: %s", symbol, e)
         return {
@@ -296,8 +296,8 @@ def rank_multiple(
     Args:
         stocks: List of dicts with keys:
             - symbol
-            - pct_vs_15m_sma200
-            - pct_vs_daily_sma50
+            - pct_vs_15m_sma50
+            - pct_vs_daily_sma20
             - rank_gm_previous (optional)
         min_threshold: Minimum score to pass filter
         accel_weight: Acceleration weighting
@@ -306,20 +306,20 @@ def rank_multiple(
         List of ranked stocks sorted by Rank_Final (highest first)
     
     Example:
-        >>> stocks = [
-        ...     {
-        ...         "symbol": "RELIANCE",
-        ...         "pct_vs_15m_sma200": 8.0,
-        ...         "pct_vs_daily_sma50": 5.0,
-        ...         "rank_gm_previous": 5.0
-        ...     },
-        ...     {
-        ...         "symbol": "TCS",
-        ...         "pct_vs_15m_sma200": 3.0,
-        ...         "pct_vs_daily_sma50": 2.0,
-        ...         "rank_gm_previous": 2.5
-        ...     }
-        ... ]
+    >>> stocks = [
+    ...     {
+    ...         "symbol": "RELIANCE",
+    ...         "pct_vs_15m_sma50": 8.0,
+    ...         "pct_vs_daily_sma20": 5.0,
+    ...         "rank_gm_previous": 5.0
+    ...     },
+    ...     {
+    ...         "symbol": "TCS",
+    ...         "pct_vs_15m_sma50": 3.0,
+    ...         "pct_vs_daily_sma20": 2.0,
+    ...         "rank_gm_previous": 2.5
+    ...     }
+    ... ]
         >>> results = rank_multiple(stocks)
         >>> [r["symbol"] for r in results if r["passes_filter"]]
         ['RELIANCE']  # TCS below threshold
@@ -330,8 +330,8 @@ def rank_multiple(
         try:
             result = rank_stock(
                 symbol=stock["symbol"],
-                pct_vs_15m_sma200=stock["pct_vs_15m_sma200"],
-                pct_vs_daily_sma50=stock["pct_vs_daily_sma50"],
+                pct_vs_15m_sma50=stock["pct_vs_15m_sma50"],
+                pct_vs_daily_sma20=stock["pct_vs_daily_sma20"],
                 rank_gm_previous=stock.get("rank_gm_previous"),
                 min_threshold=min_threshold,
                 accel_weight=accel_weight
@@ -440,9 +440,9 @@ if __name__ == "__main__":
     # Test 8: Batch ranking
     try:
         stocks = [
-            {"symbol": "RELIANCE", "pct_vs_15m_sma200": 8.0, "pct_vs_daily_sma50": 5.0, "rank_gm_previous": 5.0},
-            {"symbol": "TCS", "pct_vs_15m_sma200": 3.0, "pct_vs_daily_sma50": 2.0, "rank_gm_previous": 2.5},
-            {"symbol": "INFY", "pct_vs_15m_sma200": -2.0, "pct_vs_daily_sma50": -1.0},
+            {"symbol": "RELIANCE", "pct_vs_15m_sma50": 8.0, "pct_vs_daily_sma20": 5.0, "rank_gm_previous": 5.0},
+            {"symbol": "TCS", "pct_vs_15m_sma50": 3.0, "pct_vs_daily_sma20": 2.0, "rank_gm_previous": 2.5},
+            {"symbol": "INFY", "pct_vs_15m_sma50": -2.0, "pct_vs_daily_sma20": -1.0},
         ]
         results = rank_multiple(stocks)
         passing = [r for r in results if r["passes_filter"]]

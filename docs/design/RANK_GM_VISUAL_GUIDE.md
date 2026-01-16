@@ -59,8 +59,8 @@ Time     Rank_GM   Accel   Rank_Final   Signal              Entry Result
 
 ```
 Formula:
-  g1 = 1 + (pct_vs_15m_sma200 / 100)
-  g2 = 1 + (pct_vs_daily_sma50 / 100)
+  g1 = 1 + (pct_vs_15m_sma50 / 100)
+  g2 = 1 + (pct_vs_daily_sma20 / 100)
   Rank_GM = (√(g1 × g2) - 1) × 100
 
 Example at 10:45:
@@ -356,8 +356,8 @@ python3 src/ranking.py
 │  STEP 1: RANK_GM (Geometric Mean of Indicators)            │
 │  ───────────────────────────────────────────              │
 │  Rank_GM = (√(g1 × g2) - 1) × 100                         │
-│  where: g1 = 1 + (pct_vs_15m_sma200 / 100)               │
-│         g2 = 1 + (pct_vs_daily_sma50 / 100)              │
+│  where: g1 = 1 + (pct_vs_15m_sma50 / 100)               │
+│         g2 = 1 + (pct_vs_daily_sma20 / 100)              │
 │                                                             │
 │  STEP 2: ACCELERATION (Rate of Change)                    │
 │  ─────────────────────────────────────────               │

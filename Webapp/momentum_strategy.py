@@ -38,7 +38,7 @@ import json
 
 TOTAL_STRATEGY_CAPITAL = Decimal("90000")  # INR total capital
 CAPITAL_PER_POSITION = Decimal("3000")  # INR per position (₹3,000 each trade)
-MAX_POSITIONS = 30  # Max 30 positions
+MAX_POSITIONS = 33  # Max 33 positions
 SCAN_INTERVAL_SECONDS = 60  # Check list every 1 minute
 
 # Entry Filters
@@ -230,6 +230,8 @@ class Broker:
         self._ltp_cache: Dict[str, Decimal] = {}
         self._ltp_callback: Optional[Callable[[str], Optional[Decimal]]] = None
         self._kite = None  # Kite Connect instance for LIVE mode
+        self._tick_map: Dict[str, Decimal] = {}
+        self._tick_map_loaded = False
         logger.info(f"Broker initialized in {mode} mode")
     
     def set_mode(self, mode: str):
@@ -270,6 +272,87 @@ class Broker:
                 logger.error(f"Failed to initialize Kite Connect: {e}")
                 raise
         return self._kite
+
+    def _load_tick_sizes(self):
+        """Load tick sizes from Csvs/instruments.csv into _tick_map.
+
+        Fallback: if no tick found, leave symbol absent (caller will use default 0.05).
+        """
+        if self._tick_map_loaded:
+            return
+        try:
+            import csv
+            import sys
+            base_dir = os.path.dirname(os.path.dirname(__file__))
+            csv_path = os.path.join(base_dir, os.getenv('INSTRUMENTS_CSV', os.path.join('Csvs','instruments.csv')))
+            if not os.path.exists(csv_path):
+                self._tick_map_loaded = True
+                return
+            with open(csv_path, 'r', newline='', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    ts = (row.get('tradingsymbol') or row.get('symbol') or '').strip()
+                    if not ts:
+                        continue
+                    tick = row.get('tick_size') or row.get('tick') or row.get('tickSize') or row.get('tickSize')
+                    if tick:
+                        try:
+                            # normalize to Decimal
+                            t = Decimal(str(tick))
+                            if t > 0:
+                                self._tick_map[ts] = t
+                        except Exception:
+                            continue
+        except Exception:
+            # silent
+            pass
+        finally:
+            self._tick_map_loaded = True
+
+    def _get_tick(self, symbol: str, fallback: Decimal = Decimal('0.05')) -> Decimal:
+        """Return tick size for symbol as Decimal. Load map lazily."""
+        if not self._tick_map_loaded:
+            self._load_tick_sizes()
+        # exact match
+        if symbol in self._tick_map:
+            return self._tick_map[symbol]
+        # try NSE:SYMBOL key variants (in instruments.csv some symbols stored differently)
+        for k in (symbol, f'NSE:{symbol}', symbol + '.NS'):
+            if k in self._tick_map:
+                return self._tick_map[k]
+        return fallback
+
+    def _round_price_to_tick(self, price: Decimal, tick: Decimal, mode: str = 'nearest') -> Decimal:
+        """Round a Decimal price to the nearest multiple of tick.
+
+        mode: 'nearest'|'floor'|'ceil' - choose rounding strategy.
+        Returns Decimal quantized to tick precision.
+        """
+        if tick is None or tick == 0:
+            return price
+        # determine decimal places for quantize
+        # tick like 0.05 -> exponent -2
+        try:
+            # ensure Decimal
+            p = Decimal(str(price))
+            t = Decimal(str(tick))
+            # compute multiplier
+            multiplier = (p / t)
+            if mode == 'floor':
+                m = int(multiplier.to_integral_value(rounding=ROUND_HALF_UP))
+                if Decimal(m) > multiplier:
+                    m = m - 1
+            elif mode == 'ceil':
+                m = int(multiplier.to_integral_value(rounding=ROUND_HALF_UP))
+                if Decimal(m) < multiplier:
+                    m = m + 1
+            else:
+                # nearest
+                m = int(multiplier.to_integral_value(rounding=ROUND_HALF_UP))
+            rounded = (Decimal(m) * t).quantize(t)
+            return rounded
+        except Exception:
+            return price
     
     def set_ltp_callback(self, callback: Callable[[str], Optional[Decimal]]):
         """Set callback function to fetch LTP from external source."""
@@ -402,9 +485,12 @@ class Broker:
             try:
                 kite = self._get_kite()
                 transaction_type = kite.TRANSACTION_TYPE_BUY if side == OrderSide.BUY else kite.TRANSACTION_TYPE_SELL
-                
-                # Round price to tick size (0.05 for most NSE stocks)
-                limit_price = float(round(exec_price * 20) / 20)  # Round to nearest 0.05
+                # Determine instrument tick and round price to tick.
+                tick = self._get_tick(symbol, fallback=Decimal('0.05'))
+                # Choose rounding direction: for BUY prefer floor (bid), for SELL prefer ceil
+                rounding_mode = 'floor' if side == OrderSide.BUY else 'ceil'
+                limit_price_dec = self._round_price_to_tick(Decimal(exec_price), tick, mode=rounding_mode)
+                limit_price = float(limit_price_dec)
                 
                 live_order_id = kite.place_order(
                     variety=kite.VARIETY_REGULAR,
@@ -427,7 +513,38 @@ class Broker:
                     "timestamp": datetime.now()
                 }
             except Exception as e:
-                logger.error(f"[LIVE] Order failed for {symbol}: {e}")
+                # Detect tick-size error from Kite and retry with corrected rounding
+                err_text = str(e)
+                logger.error(f"[LIVE] Order failed for {symbol}: {err_text}")
+                try:
+                    import re
+                    m = re.search(r"tick size for this script is\s*([0-9]*\.?[0-9]+)", err_text, flags=re.IGNORECASE)
+                    if m:
+                        kite_tick = Decimal(m.group(1))
+                        logger.info(f"Detected exchange tick for {symbol}: {kite_tick}. Retrying with rounded price.")
+                        rounded_retry = float(self._round_price_to_tick(Decimal(exec_price), kite_tick, mode=rounding_mode))
+                        logger.info(f"Retrying LIVE order for {symbol} qty={qty} @ ₹{rounded_retry:.2f}")
+                        live_order_id = kite.place_order(
+                            variety=kite.VARIETY_REGULAR,
+                            exchange=kite.EXCHANGE_NSE,
+                            tradingsymbol=symbol,
+                            transaction_type=transaction_type,
+                            quantity=qty,
+                            product=kite.PRODUCT_CNC,
+                            order_type=kite.ORDER_TYPE_LIMIT,
+                            price=rounded_retry
+                        )
+                        logger.info(f"[LIVE] RETRY {side.value} LIMIT Order: {symbol} qty={qty} @ ₹{rounded_retry:.2f} | Order ID: {live_order_id}")
+                        return {
+                            "order_id": str(live_order_id),
+                            "status": "COMPLETE",
+                            "fill_price": Decimal(str(rounded_retry)),
+                            "fill_qty": qty,
+                            "timestamp": datetime.now()
+                        }
+                except Exception as e2:
+                    logger.error(f"Retry after tick-size parse failed for {symbol}: {e2}")
+
                 return {
                     "order_id": order_id,
                     "status": "REJECTED",
@@ -457,27 +574,60 @@ class Broker:
         else:
             try:
                 kite = self._get_kite()
-                
+
+                # Round trigger and target to instrument tick
+                tick = self._get_tick(symbol, fallback=Decimal('0.05'))
+                trigger_dec = self._round_price_to_tick(Decimal(trigger_price), tick, mode='floor')
+                target_dec = self._round_price_to_tick(Decimal(target_price), tick, mode='ceil')
+
                 # Place single-leg GTT order
                 gtt_id = kite.place_gtt(
                     trigger_type=kite.GTT_TYPE_SINGLE,
                     tradingsymbol=symbol,
                     exchange=kite.EXCHANGE_NSE,
-                    trigger_values=[trigger_price],
-                    last_price=float(self.get_ltp(symbol) or trigger_price),
+                    trigger_values=[float(trigger_dec)],
+                    last_price=float(self.get_ltp(symbol) or float(trigger_dec)),
                     orders=[{
                         "transaction_type": kite.TRANSACTION_TYPE_SELL,
                         "quantity": qty,
                         "product": kite.PRODUCT_CNC,
                         "order_type": kite.ORDER_TYPE_LIMIT,
-                        "price": target_price
+                        "price": float(target_dec)
                     }]
                 )
-                
-                logger.info(f"[LIVE] GTT {label}: {symbol} qty={qty} trigger=₹{trigger_price:.2f} | GTT ID: {gtt_id}")
+
+                logger.info(f"[LIVE] GTT {label}: {symbol} qty={qty} trigger=₹{trigger_dec:.2f} | GTT ID: {gtt_id}")
                 return {"status": "SUCCESS", "gtt_id": str(gtt_id)}
             except Exception as e:
-                logger.error(f"[LIVE] GTT failed for {symbol}: {e}")
+                err_text = str(e)
+                logger.error(f"[LIVE] GTT failed for {symbol}: {err_text}")
+                try:
+                    import re
+                    m = re.search(r"tick size for this script is\s*([0-9]*\.?[0-9]+)", err_text, flags=re.IGNORECASE)
+                    if m:
+                        kite_tick = Decimal(m.group(1))
+                        logger.info(f"Detected exchange tick for {symbol}: {kite_tick}. Retrying GTT with rounded trigger/target.")
+                        trigger_retry = float(self._round_price_to_tick(Decimal(trigger_price), kite_tick, mode='floor'))
+                        target_retry = float(self._round_price_to_tick(Decimal(target_price), kite_tick, mode='ceil'))
+                        gtt_id = kite.place_gtt(
+                            trigger_type=kite.GTT_TYPE_SINGLE,
+                            tradingsymbol=symbol,
+                            exchange=kite.EXCHANGE_NSE,
+                            trigger_values=[trigger_retry],
+                            last_price=float(self.get_ltp(symbol) or trigger_retry),
+                            orders=[{
+                                "transaction_type": kite.TRANSACTION_TYPE_SELL,
+                                "quantity": qty,
+                                "product": kite.PRODUCT_CNC,
+                                "order_type": kite.ORDER_TYPE_LIMIT,
+                                "price": target_retry
+                            }]
+                        )
+                        logger.info(f"[LIVE] GTT RETRY {label}: {symbol} qty={qty} trigger=₹{trigger_retry:.2f} | GTT ID: {gtt_id}")
+                        return {"status": "SUCCESS", "gtt_id": str(gtt_id)}
+                except Exception as e2:
+                    logger.error(f"Retry GTT after tick-size parse failed for {symbol}: {e2}")
+
                 return {"status": "FAILED", "reason": str(e)}
     
     def exit_order(self, trade: Trade) -> Dict[str, Any]:
@@ -1799,6 +1949,38 @@ def register_strategy_routes(app):
             status = get_strategy_status()
             return jsonify(status)
         except Exception as e:
+            return jsonify({"error": str(e)}), 500
+
+    @app.route('/api/strategy/mode', methods=['POST'])
+    def api_strategy_mode():
+        """Change global execution mode (PAPER or LIVE) immediately.
+
+        Body: { "mode": "PAPER" | "LIVE" }
+        """
+        try:
+            data = request.get_json(silent=True) or {}
+            mode = (data.get('mode') or '').upper()
+            if mode not in ('PAPER', 'LIVE'):
+                return jsonify({"error": f"Invalid mode: {mode}. Must be PAPER or LIVE"}), 400
+
+            # Safety checks when switching to LIVE
+            if mode == 'LIVE':
+                import os
+                base_dir = os.path.dirname(os.path.dirname(__file__))
+                api_key = os.getenv('KITE_API_KEY')
+                token_path = os.path.join(base_dir, 'Core_files', 'token.txt')
+                if not api_key:
+                    return jsonify({"error": "LIVE mode blocked: KITE_API_KEY not configured in environment"}), 400
+                if not os.path.exists(token_path):
+                    return jsonify({"error": "LIVE mode blocked: access token not found. Run auth to generate Core_files/token.txt"}), 400
+
+            strategy = get_strategy()
+            # Perform the mode switch (thread-safe inside strategy)
+            strategy.switch_mode(mode)
+
+            return jsonify({"status": "ok", "mode": strategy.broker.mode, "db": strategy.db.db_path})
+        except Exception as e:
+            logger.exception("/api/strategy/mode failed: %s", e)
             return jsonify({"error": str(e)}), 500
     
     @app.route('/api/strategy/momentum/parameters')

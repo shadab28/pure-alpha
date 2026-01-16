@@ -1202,14 +1202,14 @@ def fetch_ltp() -> Dict[str, Any]:
         ratio_15m_50_200 = None
         if sma50_15m and sma200_15m and sma200_15m != 0:
             ratio_15m_50_200 = round(sma50_15m / sma200_15m, 4)
-        # Percent changes vs 15m SMA200 and daily SMA50
-        pct_vs_15m_sma200 = None
-        if isinstance(last_price, (int, float)) and isinstance(sma200_15m, (int, float)) and sma200_15m:
-            pct_vs_15m_sma200 = round((last_price - sma200_15m) / sma200_15m * 100, 2)
-        pct_vs_daily_sma50 = None
-        daily_sma50_val = daily.get("sma50")
-        if isinstance(last_price, (int, float)) and isinstance(daily_sma50_val, (int, float)) and daily_sma50_val:
-            pct_vs_daily_sma50 = round((last_price - daily_sma50_val) / daily_sma50_val * 100, 2)
+        # Percent changes vs 15m SMA50 and daily SMA20 (updated per new ranking)
+        pct_vs_15m_sma50 = None
+        if isinstance(last_price, (int, float)) and isinstance(sma50_15m, (int, float)) and sma50_15m:
+            pct_vs_15m_sma50 = round((last_price - sma50_15m) / sma50_15m * 100, 2)
+        pct_vs_daily_sma20 = None
+        daily_sma20_val = daily.get("sma20") or daily.get("sma20")
+        if isinstance(last_price, (int, float)) and isinstance(daily_sma20_val, (int, float)) and daily_sma20_val:
+            pct_vs_daily_sma20 = round((last_price - daily_sma20_val) / daily_sma20_val * 100, 2)
         # Drawdown from recent 200-candle high (15m) in %
         drawdown_15m_200_pct = None
         if isinstance(last_price, (int, float)) and isinstance(high200_15m, (int, float)) and high200_15m:
@@ -1225,14 +1225,14 @@ def fetch_ltp() -> Dict[str, Any]:
                 pullback_15m_200_pct = round((last_price - low200) / low200 * 100, 2)
             except Exception:
                 pullback_15m_200_pct = None
-        # Geometric-mean based ranking metric using only deviations vs 15m SMA200 and daily SMA50.
+        # Geometric-mean based ranking metric using deviations vs 15m SMA50 and daily SMA20.
         # Idea: Convert each percentage deviation into a growth factor (1 + pct/100),
         # then take geometric mean of the two and map back to a percentage.
         rank_gm = None
         try:
-            if pct_vs_15m_sma200 is not None and pct_vs_daily_sma50 is not None:
-                g1 = 1 + (pct_vs_15m_sma200 / 100.0)
-                g2 = 1 + (pct_vs_daily_sma50 / 100.0)
+            if pct_vs_15m_sma50 is not None and pct_vs_daily_sma20 is not None:
+                g1 = 1 + (pct_vs_15m_sma50 / 100.0)
+                g2 = 1 + (pct_vs_daily_sma20 / 100.0)
                 if g1 > 0 and g2 > 0:
                     rank_gm = round(((g1 * g2)**0.5 - 1) * 100.0, 2)
         except Exception:
@@ -1243,12 +1243,13 @@ def fetch_ltp() -> Dict[str, Any]:
             "sma200_15m": sma200_15m,
             "sma50_15m": sma50_15m,
             "ratio_15m_50_200": ratio_15m_50_200,
-            "pct_vs_15m_sma200": pct_vs_15m_sma200,
-            "pct_vs_daily_sma50": pct_vs_daily_sma50,
+            "pct_vs_15m_sma50": pct_vs_15m_sma50,
+            "pct_vs_daily_sma20": pct_vs_daily_sma20,
             "rank_gm": rank_gm,
             "drawdown_15m_200_pct": drawdown_15m_200_pct,
             "volume_ratio_d5_d200": vol_ratio,
             "days_since_golden_cross": days_since_gc,
+            "daily_sma20": daily.get("sma20"),
             "daily_sma50": daily.get("sma50"),
             "daily_sma200": daily.get("sma200"),
             "daily_ratio_50_200": daily.get("ratio"),
@@ -1338,6 +1339,7 @@ def get_ck_data() -> Dict[str, Any]:
         last_price = info.get('last_price')
         rsi = _rsi15m_cache.get(sym)
         position_count = positions_count.get(sym, 0)
+
         # Strategy heuristics (CK final):
         # - Bullish setup: 15m sma50 > sma200 and daily sma50 > daily sma200
         # - Pullback: bullish but price below 15m sma200 or below sma50_15m
@@ -1346,19 +1348,24 @@ def get_ck_data() -> Dict[str, Any]:
         sma50_15m = info.get('sma50_15m')
         sma200_15m = info.get('sma200_15m')
         daily_ratio = info.get('daily_ratio_50_200')
-        pct_vs_15m = info.get('pct_vs_15m_sma200')
+        pct_vs_15m = info.get('pct_vs_15m_sma50')
         days_since_gc = info.get('days_since_golden_cross')
 
         signal = 'Neutral'
         action = 'Hold'
         try:
-            bullish_15m = (isinstance(sma50_15m, (int,float)) and isinstance(sma200_15m, (int,float)) and sma50_15m > sma200_15m)
-            bullish_daily = (isinstance(daily_ratio, (int,float)) and daily_ratio > 1.0)
+            bullish_15m = (
+                isinstance(sma50_15m, (int, float))
+                and isinstance(sma200_15m, (int, float))
+                and sma50_15m > sma200_15m
+            )
+            bullish_daily = (isinstance(daily_ratio, (int, float)) and daily_ratio > 1.0)
+
             if bullish_15m and bullish_daily:
                 # Strong multi-timeframe alignment
                 signal = 'Bullish'
                 # If price dipped below 15m SMA200 or sma50_15m -> pullback accumulation
-                if isinstance(pct_vs_15m, (int,float)) and pct_vs_15m < 0:
+                if isinstance(pct_vs_15m, (int, float)) and pct_vs_15m < 0:
                     action = 'Accumulate on pullback'
                 else:
                     action = 'Trade / Add on strength'
@@ -1366,20 +1373,30 @@ def get_ck_data() -> Dict[str, Any]:
                 signal = 'Daily Bull'
                 # Daily strong but 15m lag -> watch for weekly follow-up
                 action = 'Watch for pullback -> accumulate'
+
             # Valuation stretch
-            if isinstance(daily_ratio, (int,float)) and daily_ratio > 1.08:
+            if isinstance(daily_ratio, (int, float)) and daily_ratio > 1.08:
                 # Mark as stretched; be cautious about adding new positions
-                if signal.startswith('Bull'):
+                if isinstance(signal, str) and signal.startswith('Bull'):
                     action = 'Caution: valuation stretched'
                 else:
                     signal = 'Stretched'
                     action = 'Defer new buys'
+
             # Call tops: simple heuristic
-            if isinstance(days_since_gc, int) and days_since_gc is not None and days_since_gc <= 5 and isinstance(pct_vs_15m, (int,float)) and pct_vs_15m < -3:
+            if (
+                isinstance(days_since_gc, int)
+                and days_since_gc is not None
+                and days_since_gc <= 5
+                and isinstance(pct_vs_15m, (int, float))
+                and pct_vs_15m < -3
+            ):
                 # recent golden cross but sharp drop on 15m -> possible top/significant distribution
                 signal = 'Top Risk'
                 action = 'Call Top / Reduce'
+
         except Exception:
+            # Fail-safe: leave defaults
             pass
 
         out[sym] = {
