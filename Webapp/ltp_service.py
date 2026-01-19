@@ -185,6 +185,7 @@ def _compute_daily_ma_for_symbol(kite: Any, symbol: str, instrument_token: int):
     closes_sorted = closes  # already chronological per API (ascending)
     if len(closes_sorted) < 10:  # insufficient data
         return {}
+    sma20 = sum(closes_sorted[-20:]) / 20 if len(closes_sorted) >= 20 else None
     sma50 = sum(closes_sorted[-50:]) / 50 if len(closes_sorted) >= 50 else None
     sma200 = sum(closes_sorted[-200:]) / 200 if len(closes_sorted) >= 200 else None
     # Use explicit None checks (avoid truthiness) so valid numeric values like 0 are handled.
@@ -194,7 +195,7 @@ def _compute_daily_ma_for_symbol(kite: Any, symbol: str, instrument_token: int):
             ratio = round(sma50 / sma200, 2)
         except Exception:
             ratio = None
-    return {"sma50": sma50, "sma200": sma200, "ratio": ratio, "updated": datetime.now()}
+    return {"sma20": sma20, "sma50": sma50, "sma200": sma200, "ratio": ratio, "updated": datetime.now()}
 
 
 def _background_daily_ma_builder(kite: Any, symbols: List[str], sym_to_token: Dict[str, int]):
@@ -1173,6 +1174,8 @@ def fetch_ltp() -> Dict[str, Any]:
     out: Dict[str, Any] = {}
     with _daily_ma_lock:
         daily_cache_snapshot = dict(_daily_ma_cache)
+    with _daily_avg_lock:
+        daily_avg_snapshot = dict(_daily_avg_cache)
     with _sma15m_lock:
         sma15m_snapshot = dict(_sma15m_cache)
         sma50_15m_snapshot = dict(_sma50_15m_cache) 
@@ -1193,6 +1196,9 @@ def fetch_ltp() -> Dict[str, Any]:
         if last_close is None:
             missing_last_close += 1
         daily = daily_cache_snapshot.get(sym) or {}
+        # Prefer the computed daily EMA(20) from _daily_avg_cache (ema20).
+        # _daily_ma_cache contains sma50/sma200 from Kite historical fetches but not ema20.
+        daily_emas = daily_avg_snapshot.get(sym) or {}
         sma200_15m = sma15m_snapshot.get(sym)
         sma50_15m = sma50_15m_snapshot.get(sym)
         high200_15m = high200_15m_snapshot.get(sym)
@@ -1207,7 +1213,9 @@ def fetch_ltp() -> Dict[str, Any]:
         if isinstance(last_price, (int, float)) and isinstance(sma50_15m, (int, float)) and sma50_15m:
             pct_vs_15m_sma50 = round((last_price - sma50_15m) / sma50_15m * 100, 2)
         pct_vs_daily_sma20 = None
-        daily_sma20_val = daily.get("sma20") or daily.get("sma20")
+        # Prefer daily SMA20 (20-day simple moving average) — treat it like the daily SMA50
+        # Fallback to EMA(20) only if SMA20 is not available.
+        daily_sma20_val = daily.get("sma20") if daily.get("sma20") is not None else daily_emas.get('ema20')
         if isinstance(last_price, (int, float)) and isinstance(daily_sma20_val, (int, float)) and daily_sma20_val:
             pct_vs_daily_sma20 = round((last_price - daily_sma20_val) / daily_sma20_val * 100, 2)
         # Drawdown from recent 200-candle high (15m) in %
@@ -1228,13 +1236,17 @@ def fetch_ltp() -> Dict[str, Any]:
         # Geometric-mean based ranking metric using deviations vs 15m SMA50 and daily SMA20.
         # Idea: Convert each percentage deviation into a growth factor (1 + pct/100),
         # then take geometric mean of the two and map back to a percentage.
+        # Note: if one of the inputs is missing (common when daily EMA/SMA data is not available),
+        # treat the missing percentage as 0.0 so we can still compute a sensible Rank_GM from
+        # the available data. This prevents `rank_gm` from being null on the frontend.
         rank_gm = None
         try:
-            if pct_vs_15m_sma50 is not None and pct_vs_daily_sma20 is not None:
-                g1 = 1 + (pct_vs_15m_sma50 / 100.0)
-                g2 = 1 + (pct_vs_daily_sma20 / 100.0)
-                if g1 > 0 and g2 > 0:
-                    rank_gm = round(((g1 * g2)**0.5 - 1) * 100.0, 2)
+            p15 = pct_vs_15m_sma50 if pct_vs_15m_sma50 is not None else 0.0
+            pdaily = pct_vs_daily_sma20 if pct_vs_daily_sma20 is not None else 0.0
+            g1 = 1 + (p15 / 100.0)
+            g2 = 1 + (pdaily / 100.0)
+            if g1 > 0 and g2 > 0:
+                rank_gm = round(((g1 * g2)**0.5 - 1) * 100.0, 2)
         except Exception:
             rank_gm = None
         out[sym] = {
@@ -1249,7 +1261,7 @@ def fetch_ltp() -> Dict[str, Any]:
             "drawdown_15m_200_pct": drawdown_15m_200_pct,
             "volume_ratio_d5_d200": vol_ratio,
             "days_since_golden_cross": days_since_gc,
-            "daily_sma20": daily.get("sma20"),
+            "daily_sma20": daily_sma20_val,
             "daily_sma50": daily.get("sma50"),
             "daily_sma200": daily.get("sma200"),
             "daily_ratio_50_200": daily.get("ratio"),
