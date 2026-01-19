@@ -219,10 +219,50 @@ access_logger = _get_logger('access', 'access.log')
 order_logger = _get_logger('orders', 'orders.log')
 error_logger = _get_logger('errors', 'errors.log')
 trail_logger = _get_logger('trail', 'trailing.log')
+# Enable debug-level tracing for trailing worker to aid diagnosis
+try:
+	trail_logger.setLevel(logging.DEBUG)
+except Exception:
+	pass
 
 # -------- In-memory store for orders placed via this webapp --------
 _orders_lock = threading.RLock()
 _orders_store: dict[str, dict] = {}
+
+# -------- Last stop-trigger timestamps to prevent immediate re-entry --------
+# Records when a stop-loss (or stop-triggered sell) occurs for a symbol.
+_last_stop_ts_lock = threading.RLock()
+_last_stop_ts: dict[str, datetime] = {}
+
+def _record_stop_trigger(symbol: str) -> None:
+	"""Record that a stop trigger/exit happened for `symbol` now.
+
+	This is used to enforce a short cooldown before taking a new entry.
+	"""
+	try:
+		if not symbol:
+			return
+		with _last_stop_ts_lock:
+			_last_stop_ts[symbol] = datetime.now()
+		order_logger.info("STOP_TRIGGER recorded for %s at %s", symbol, _last_stop_ts[symbol].isoformat())
+	except Exception as e:
+		error_logger.warning("Failed to record stop trigger for %s: %s", symbol, e)
+
+def _can_enter_symbol(symbol: str, cooldown_seconds: int = 180) -> tuple[bool, int | None]:
+	"""Return (allowed, remaining_seconds).
+
+	allowed is True when no recent stop within cooldown_seconds. If False, remaining_seconds
+	is how many seconds left before entry is permitted.
+	"""
+	with _last_stop_ts_lock:
+		ts = _last_stop_ts.get(symbol)
+	if not ts:
+		return True, None
+	delta = datetime.now() - ts
+	rem = cooldown_seconds - int(delta.total_seconds())
+	if rem <= 0:
+		return True, None
+	return False, rem
 
 # Cached broker orders (updated via Kite Ticker order_update), and cached GTTs
 _broker_orders_cache: dict[str, dict] = {}
@@ -281,6 +321,19 @@ def _ensure_order_listener():
 				return
 			with _broker_orders_lock:
 				_broker_orders_cache[oid] = data
+			# If this order update looks like a stop-loss / exit (SELL filled, or trigger by stop), record it
+			try:
+				otype = (data.get('transaction_type') or data.get('transactionType') or '').upper()
+				status = (data.get('status') or data.get('order_status') or '').upper()
+				symbol = data.get('tradingsymbol') or data.get('instrument_token') or None
+				# Heuristic: a SELL order that reached 'COMPLETE' or 'TRIGGERED' likely indicates an exit
+				if otype == 'SELL' and status in ('COMPLETE', 'TRIGGERED', 'FILLED', 'COMPLETE'):
+					# tradingsymbol should be a symbol string; only record if looks like NSE symbol
+					if isinstance(symbol, str) and symbol:
+						_record_stop_trigger(symbol)
+			except Exception:
+				# don't let this break order handling
+				pass
 			# broadcast to SSE listeners
 			try:
 				msg = json.dumps({"type":"order_update","order":data})
@@ -1302,6 +1355,61 @@ def _ensure_trailer_thread(kite):
 	if _trail_thread_started:
 		return
 	_trail_thread_started = True
+    
+	# Bootstrap: import existing active GTTs from broker into our trail state so
+	# we can manage GTTs that were created before this process started.
+	def _bootstrap_trailing_from_broker():
+		if not hasattr(kite, 'get_gtts'):
+			return
+		try:
+			resp = kite.get_gtts() or {}
+		except Exception:
+			# If broker query fails, skip bootstrap silently
+			error_logger.debug("Failed to fetch broker GTTs for bootstrap", exc_info=True)
+			return
+		items = resp.get('items') or resp.get('triggers') or []
+		for g in items:
+			try:
+				if (g.get('status') or '').lower() != 'active':
+					continue
+				cond = g.get('condition') or {}
+				sym = cond.get('tradingsymbol') or g.get('tradingsymbol')
+				if not sym:
+					continue
+				# Determine stop trigger (first trigger value)
+				trigs = cond.get('trigger_values') or []
+				if not trigs:
+					continue
+				stop_trig = float(trigs[0])
+				last_price = float(cond.get('last_price') or g.get('last_price') or stop_trig)
+				# estimate sl_pct from last_price and stop trigger
+				sl_pct = (last_price - stop_trig) / last_price if last_price and last_price > 0 else 0.05
+				# qty from orders
+				qty = 0
+				for o in (g.get('orders') or []):
+					if (o.get('transaction_type') or '').upper() == 'SELL':
+						qty = int(o.get('quantity') or qty or 0)
+				# pick tick for symbol
+				try:
+					inst_csv = os.path.join(REPO_ROOT, os.getenv('INSTRUMENTS_CSV', os.path.join('Csvs','instruments.csv')))
+					ticks = _load_tick_sizes(inst_csv)
+					tick = ticks.get(sym) or _fallback_tick_by_price(last_price)
+				except Exception:
+					tick = 0.05
+				with _trail_lock_obj():
+					if str(g.get('id') or g.get('trigger_id')) in _trail_state:
+						continue
+					# register trailing state
+					_start_trailing(kite, sym, int(qty or 1), float(sl_pct), ltp=last_price, tick=tick, gtt_id=str(g.get('id') or g.get('trigger_id')), gtt_type=('oco' if (g.get('type') or '').lower() in ('two-leg','oco') else 'single'), initial_trigger=stop_trig)
+			except Exception:
+				# don't let bootstrap failures stop the app
+				error_logger.debug("Trailing bootstrap failed for a trigger", exc_info=True)
+
+	# run bootstrap once before starting worker
+	try:
+		_bootstrap_trailing_from_broker()
+	except Exception:
+		error_logger.debug("Trailing bootstrap runner failed", exc_info=True)
 	import threading, time
 
 	def worker():
@@ -1376,6 +1484,9 @@ def _ensure_trailer_thread(kite):
 					# raise SL by modifying/replacing GTT
 					try:
 						gtt_type = st.get('gtt_type', 'single')  # default to single for backward compat
+						# Diagnostic log: show state and available kite methods
+						trail_logger.debug("TRAIL_DECIDE symbol=%s gtt_id=%s has_modify=%s gtt_type=%s current_stop=%.2f new_stop=%.2f gap=%.2f ltp=%.2f st=%s",
+								sym, st.get('gtt_id'), hasattr(kite, 'modify_gtt'), gtt_type, current_trigger, new_trig, current_gap_pct*100, ltp, {k: st.get(k) for k in ('qty','sl_pct','initial_target','target_pct')})
 						if hasattr(kite, 'modify_gtt') and st.get('gtt_id'):
 							if gtt_type == 'oco':
 								# OCO GTT: update stop trigger but keep target price fixed (don't change it)
@@ -1409,6 +1520,7 @@ def _ensure_trailer_thread(kite):
 									]
 								)
 								trail_logger.info("TRAIL_MODIFY_OCO symbol=%s gtt_id=%s stop=%.2f target=%.2f (fixed)", sym, st.get('gtt_id'), new_trig, new_target)
+								trail_logger.debug("TRAIL_MODIFY_RESP symbol=%s gtt_id=%s resp=%s", sym, st.get('gtt_id'), str(resp))
 							else:
 								# Single-leg GTT
 								resp = kite.modify_gtt(
@@ -1427,6 +1539,7 @@ def _ensure_trailer_thread(kite):
 									}]
 								)
 								trail_logger.info("TRAIL_MODIFY symbol=%s gtt_id=%s trigger=%.2f", sym, st.get('gtt_id'), new_trig)
+								trail_logger.debug("TRAIL_MODIFY_RESP symbol=%s gtt_id=%s resp=%s", sym, st.get('gtt_id'), str(resp))
 							with _trail_lock_obj():
 								st['trigger'] = new_trig
 						else:
@@ -1437,6 +1550,7 @@ def _ensure_trailer_thread(kite):
 								except Exception as e:
 									error_logger.debug("Silent exception ignored: %s", e)
 							new_id = _place_sl_gtt(kite, sym, st['qty'], ref_price=ltp, sl_pct=st['sl_pct'])
+							trail_logger.debug("TRAIL_REPLACE_NEW symbol=%s new_gtt_id=%s new_trigger=%.2f resp_placeholder=NA", sym, new_id, new_trig)
 							with _trail_lock_obj():
 								st['gtt_id'] = new_id
 								st['trigger'] = new_trig
@@ -1474,6 +1588,7 @@ def _start_trailing(kite, symbol: str, qty: int, sl_pct: float, ltp: float, tick
 			'initial_target': initial_target,  # Store fixed target price
 		})
 		_trail_state[str(gtt_id)] = state
+		trail_logger.info("TRAIL_REGISTER gtt_id=%s symbol=%s qty=%s sl_pct=%.4f trigger=%.2f gtt_type=%s", str(gtt_id), symbol, qty, sl_pct, trigger or 0.0, gtt_type)
 	_ensure_trailer_thread(kite)
 
 # Helper function to log trade entries to the database
@@ -1625,6 +1740,12 @@ def api_place_buy():
 		user = get_current_user()
 		order_logger.info("ORDER_REQ symbol=%s budget=%.2f offset=%.4f market=%s tsl=%s sl_pct=%.3f user=%s from=%s", symbol, budget, offset_pct, use_market, with_tsl, sl_pct, user.username if user else "anonymous", request.remote_addr)
 		kite = get_kite()
+
+		# Enforce cooldown after a stop-trigger for this symbol (default 3 minutes)
+		allowed, remaining = _can_enter_symbol(symbol, cooldown_seconds=180)
+		if not allowed:
+			order_logger.warning("ENTRY_BLOCKED_COOLDOWN symbol=%s remaining_seconds=%s", symbol, remaining)
+			return jsonify({"error": "Entry blocked: recent stop-loss/exit for this symbol. Try again later.", "retry_after_seconds": remaining}), 429
 		# Fetch fresh LTP
 		qd = kite.quote([f"NSE:{symbol}"]) or {}
 		q = qd.get(f"NSE:{symbol}") or {}
@@ -2226,15 +2347,17 @@ def api_book_gtt():
 def api_trade_journal():
 	"""Get, create, or update trade journal entries with order book data."""
 	from pgAdmin_database.db_connection import pg_cursor
-	
+
+	# Keep the function small and robust. Support both `timestamp` and `entry_date`
+	# column names for backward compatibility.
 	try:
-		if request.method == 'POST':
-			# Create a new trade journal entry
-			data = request.get_json()
+		method = request.method
+		if method == 'POST':
+			data = request.get_json() or {}
 			trade_id = data.get('trade_id')
-			symbol = data.get('symbol')
-			timestamp = data.get('timestamp')
-			side = data.get('side')  # 'BUY' or 'SELL'
+			symbol = (data.get('symbol') or '').strip().upper()
+			ts_val = data.get('timestamp') or data.get('entry_date')
+			side = data.get('side')
 			order_book_imbalance = data.get('order_book_imbalance')
 			intended_entry_price = data.get('intended_entry_price')
 			fill_price = data.get('fill_price')
@@ -2242,19 +2365,21 @@ def api_trade_journal():
 			exit_price = data.get('exit_price')
 			pnl = data.get('pnl')
 			setup_description = data.get('setup_description')
-			
-			if not symbol or not timestamp or not side:
-				return jsonify({"error": "symbol, timestamp, and side are required"}), 400
-			
+
+			# basic validation: require symbol and a timestamp-like value
+			if not symbol or not ts_val:
+				return jsonify({"error": "symbol and timestamp (or entry_date) are required"}), 400
+
 			with pg_cursor() as (cur, conn):
-				# Create table if it doesn't exist
+				# Create table if missing (idempotent). Include both columns to be tolerant.
 				cur.execute("""
 					CREATE TABLE IF NOT EXISTS trade_journal (
 						id SERIAL PRIMARY KEY,
 						trade_id TEXT UNIQUE,
 						symbol TEXT NOT NULL,
-						timestamp TIMESTAMP NOT NULL,
-						side TEXT NOT NULL,
+						entry_date TIMESTAMP,
+						timestamp TIMESTAMP,
+						side TEXT,
 						order_book_imbalance NUMERIC,
 						intended_entry_price NUMERIC,
 						fill_price NUMERIC,
@@ -2263,99 +2388,169 @@ def api_trade_journal():
 						pnl NUMERIC,
 						setup_description TEXT,
 						created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-						updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+						updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+						strategy TEXT,
+						status TEXT
 					)
 				""")
-				
-				# Insert or update the trade
-				if trade_id:
-					cur.execute("""
-						INSERT INTO trade_journal (trade_id, symbol, timestamp, side, order_book_imbalance, 
-													intended_entry_price, fill_price, slippage, exit_price, pnl, setup_description)
-						VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-						ON CONFLICT (trade_id) DO UPDATE SET
-							exit_price = EXCLUDED.exit_price,
-							pnl = EXCLUDED.pnl,
-							updated_at = CURRENT_TIMESTAMP
-					""", (trade_id, symbol, timestamp, side, order_book_imbalance, intended_entry_price, 
-						  fill_price, slippage, exit_price, pnl, setup_description))
+
+				# inspect existing schema so we only include columns that actually exist
+				cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'trade_journal'")
+				cols = {r[0] for r in cur.fetchall()}
+				if 'timestamp' in cols:
+					ts_col = 'timestamp'
+				elif 'entry_date' in cols:
+					ts_col = 'entry_date'
 				else:
-					cur.execute("""
-						INSERT INTO trade_journal (symbol, timestamp, side, order_book_imbalance, 
-													intended_entry_price, fill_price, slippage, exit_price, pnl, setup_description)
-						VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-					""", (symbol, timestamp, side, order_book_imbalance, intended_entry_price, 
-						  fill_price, slippage, exit_price, pnl, setup_description))
-				
-				conn.commit()
-				cur.execute("SELECT id FROM trade_journal WHERE trade_id = %s OR (trade_id IS NULL AND symbol = %s AND timestamp = %s)", 
-						   (trade_id, symbol, timestamp))
-				result = cur.fetchone()
-				new_id = result[0] if result else None
-			
+					ts_col = 'entry_date'
+
+				# build a mapping of candidate columns to values
+				cand = {
+					'trade_id': trade_id,
+					'symbol': symbol,
+					ts_col: ts_val,
+					'side': side,
+					'order_book_imbalance': order_book_imbalance,
+					'intended_entry_price': intended_entry_price,
+					'fill_price': fill_price,
+					'slippage': slippage,
+					'exit_price': exit_price,
+					'pnl': pnl,
+					'setup_description': setup_description,
+				}
+
+				# select only columns that exist and have non-None values
+				insert_cols = []
+				insert_vals = []
+				for k, v in cand.items():
+					if k in cols and v is not None:
+						insert_cols.append(k)
+						insert_vals.append(v)
+
+				# perform insert/upsert depending on presence of trade_id
+				new_id = None
+				if not insert_cols:
+					# nothing to insert
+					access_logger.warning("/api/trade-journal POST: nothing to insert for symbol=%s", symbol)
+				else:
+					placeholders = ','.join(['%s'] * len(insert_cols))
+					cols_sql = ', '.join(insert_cols)
+					if trade_id and 'trade_id' in insert_cols:
+						# build upsert; include commonly-updated columns only if they exist
+						update_sets = []
+						if 'exit_price' in cols:
+							update_sets.append('exit_price = EXCLUDED.exit_price')
+						if 'pnl' in cols:
+							update_sets.append('pnl = EXCLUDED.pnl')
+						if 'updated_at' in cols:
+							update_sets.append('updated_at = CURRENT_TIMESTAMP')
+						if update_sets:
+							upsert_sql = f"INSERT INTO trade_journal ({cols_sql}) VALUES ({placeholders}) ON CONFLICT (trade_id) DO UPDATE SET {', '.join(update_sets)}"
+						else:
+							# no meaningful update columns; fall back to insert with ON CONFLICT DO NOTHING
+							upsert_sql = f"INSERT INTO trade_journal ({cols_sql}) VALUES ({placeholders}) ON CONFLICT (trade_id) DO NOTHING"
+						cur.execute(upsert_sql, tuple(insert_vals))
+					else:
+						# simple insert
+						ins_sql = f"INSERT INTO trade_journal ({cols_sql}) VALUES ({placeholders})"
+						cur.execute(ins_sql, tuple(insert_vals))
+					conn.commit()
+
+					# fetch id of inserted/updated row
+					try:
+						if trade_id:
+							cur.execute("SELECT id FROM trade_journal WHERE trade_id = %s", (trade_id,))
+							res = cur.fetchone()
+							new_id = res[0] if res else None
+						else:
+							if ts_col in cols:
+								cur.execute(f"SELECT id FROM trade_journal WHERE symbol = %s AND {ts_col} = %s ORDER BY id DESC LIMIT 1", (symbol, ts_val))
+								res = cur.fetchone()
+								new_id = res[0] if res else None
+					except Exception:
+						new_id = None
+
 			access_logger.info("/api/trade-journal POST: symbol=%s, side=%s", symbol, side)
-			return jsonify({"success": True, "id": new_id, "symbol": symbol, "side": side})
-		
-		elif request.method == 'PUT':
-			# Update an existing trade entry (for exit prices and PnL)
-			data = request.get_json()
+			resp = {"success": True, "id": new_id, "symbol": symbol}
+			if side is not None:
+				resp['side'] = side
+			return jsonify(resp)
+
+		elif method == 'PUT':
+			data = request.get_json() or {}
 			trade_id = data.get('trade_id')
-			
 			if not trade_id:
 				return jsonify({"error": "trade_id is required for update"}), 400
-			
 			with pg_cursor() as (cur, conn):
-				cur.execute("""
-					UPDATE trade_journal 
-					SET exit_price = %s, pnl = %s, updated_at = CURRENT_TIMESTAMP
+				cur.execute(
+					"""
+					UPDATE trade_journal
+					SET exit_price = %s, pnl = %s, updated_at = CURRENT_TIMESTAMP, exit_date = COALESCE(%s, exit_date)
 					WHERE trade_id = %s
-				""", (data.get('exit_price'), data.get('pnl'), trade_id))
-				
+					""",
+					(data.get('exit_price'), data.get('pnl'), data.get('exit_date'), trade_id)
+				)
 				conn.commit()
-			
 			access_logger.info("/api/trade-journal PUT: trade_id=%s, pnl=%s", trade_id, data.get('pnl'))
 			return jsonify({"success": True, "trade_id": trade_id})
-		
+
 		else:  # GET
-			# Fetch trade journal entries
 			symbol_filter = request.args.get('symbol')
 			days_back = int(request.args.get('days', 30))
-			
 			with pg_cursor() as (cur, conn):
-				if symbol_filter:
-					cur.execute("""
-						SELECT id, trade_id, symbol, timestamp, side, order_book_imbalance,
-								intended_entry_price, fill_price, slippage, exit_price, pnl,
-								setup_description, created_at, updated_at
-						FROM trade_journal
-						WHERE symbol = %s AND timestamp >= NOW() - INTERVAL '%s days'
-						ORDER BY timestamp DESC
-					""", (symbol_filter, days_back))
+				# detect which timestamp-like column exists and use it
+				# inspect schema and pick only columns that actually exist so this endpoint
+				# is tolerant to schema variants (older/newer deployments may lack some cols)
+				cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'trade_journal'")
+				schema_cols = [r[0] for r in cur.fetchall()]
+				if 'timestamp' in schema_cols:
+					ts_col = 'timestamp'
+				elif 'entry_date' in schema_cols:
+					ts_col = 'entry_date'
 				else:
-					cur.execute("""
-						SELECT id, trade_id, symbol, timestamp, side, order_book_imbalance,
-								intended_entry_price, fill_price, slippage, exit_price, pnl,
-								setup_description, created_at, updated_at
-						FROM trade_journal
-						WHERE timestamp >= NOW() - INTERVAL '%s days'
-						ORDER BY timestamp DESC
-					""", (days_back,))
-				
+					ts_col = 'entry_date'
+
+				# Use a minimal stable set of fields to stay compatible with different DB schemas.
+				fields = ['id', 'trade_id', 'symbol', f"{ts_col} AS ts"]
+
+				base_select = "SELECT " + ", ".join(fields) + " FROM trade_journal"
+				access_logger.debug("trade_journal schema_cols=%s", schema_cols)
+				access_logger.debug("trade_journal selected fields=%s", fields)
+				access_logger.debug("trade_journal base_select=%s", base_select)
+				# Execute the constructed query; if the database complains about a missing
+				# column (schema mismatch), fall back to a minimal safe select to avoid 500s.
+				try:
+					if symbol_filter:
+						cur.execute(base_select + f" WHERE symbol = %s AND {ts_col} >= NOW() - INTERVAL '{days_back} days' ORDER BY {ts_col} DESC", (symbol_filter,))
+					else:
+						cur.execute(base_select + f" WHERE {ts_col} >= NOW() - INTERVAL '{days_back} days' ORDER BY {ts_col} DESC")
+				except Exception:
+					# Retry with minimal core fields only (id, trade_id, symbol, timestamp)
+					minimal_fields = [
+						'id', 'trade_id', 'symbol', f"{ts_col} AS ts"
+					]
+					minimal_select = "SELECT " + ", ".join(minimal_fields) + " FROM trade_journal"
+					if symbol_filter:
+						cur.execute(minimal_select + f" WHERE symbol = %s AND {ts_col} >= NOW() - INTERVAL '{days_back} days' ORDER BY {ts_col} DESC", (symbol_filter,))
+					else:
+						cur.execute(minimal_select + f" WHERE {ts_col} >= NOW() - INTERVAL '{days_back} days' ORDER BY {ts_col} DESC")
 				rows = cur.fetchall()
 				cols = [desc[0] for desc in cur.description]
 				trades = [dict(zip(cols, row)) for row in rows]
-				
-				# Convert timestamps to ISO format for JSON
+				# normalize datetime fields to isoformat
 				for trade in trades:
-					if trade['timestamp']:
-						trade['timestamp'] = trade['timestamp'].isoformat()
-					if trade['created_at']:
+					if trade.get('ts'):
+						trade['ts'] = trade['ts'].isoformat()
+					if trade.get('created_at'):
 						trade['created_at'] = trade['created_at'].isoformat()
-					if trade['updated_at']:
+					if trade.get('updated_at'):
 						trade['updated_at'] = trade['updated_at'].isoformat()
-			
-			return jsonify(trades)
-	
+				# present timestamp as 'timestamp' for clients expecting that field
+				for t in trades:
+					if 'ts' in t:
+						t['timestamp'] = t.pop('ts')
+				return jsonify(trades)
+
 	except Exception as e:
 		error_logger.exception("/api/trade-journal failed: %s", e)
 		return jsonify({"error": str(e)}), 500
@@ -2509,6 +2704,41 @@ def api_trade_journal_stats():
 	except Exception as e:
 		error_logger.exception("/api/trade-journal/stats failed: %s", e)
 		return jsonify({"error": str(e)}), 500
+
+
+	@app.route('/api/trade-journal/min', methods=['GET'])
+	def api_trade_journal_min():
+		"""Minimal, tolerant read of trade_journal: returns id, trade_id, symbol, timestamp.
+		Use this when the richer `/api/trade-journal` fails due to schema mismatches.
+		Query param: days (int, default 30), symbol (optional)
+		"""
+		try:
+			days_back = int(request.args.get('days', 30))
+			symbol_filter = (request.args.get('symbol') or '').strip().upper() or None
+			from pgAdmin_database.db_connection import pg_cursor
+			with pg_cursor() as (cur, conn):
+				# ensure table exists
+				cur.execute("SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'trade_journal')")
+				if not cur.fetchone()[0]:
+					return jsonify([])
+
+				# coalesce timestamp-like columns into a single column
+				# Use explicit SQL to avoid referencing missing columns
+				sql_where = f"COALESCE(timestamp, entry_date) >= NOW() - INTERVAL '{days_back} days'"
+				if symbol_filter:
+					cur.execute(f"SELECT id, trade_id, symbol, COALESCE(timestamp, entry_date) AS ts FROM trade_journal WHERE symbol = %s AND {sql_where} ORDER BY ts DESC", (symbol_filter,))
+				else:
+					cur.execute(f"SELECT id, trade_id, symbol, COALESCE(timestamp, entry_date) AS ts FROM trade_journal WHERE {sql_where} ORDER BY ts DESC")
+				rows = cur.fetchall()
+				cols = [desc[0] for desc in cur.description]
+				trades = [dict(zip(cols, row)) for row in rows]
+				for t in trades:
+					if t.get('ts'):
+						t['timestamp'] = t.pop('ts').isoformat() if hasattr(t['ts'], 'isoformat') else t.pop('ts')
+				return jsonify(trades)
+		except Exception as e:
+			error_logger.exception("/api/trade-journal/min failed: %s", e)
+			return jsonify({"error": str(e)}), 500
 
 # --------- DEBUG ENDPOINTS FOR TROUBLESHOOTING MISSING DATA ---------
 

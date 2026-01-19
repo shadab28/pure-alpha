@@ -36,9 +36,9 @@ import json
 # CONFIGURATION
 # ============================================================================
 
-TOTAL_STRATEGY_CAPITAL = Decimal("90000")  # INR total capital
+TOTAL_STRATEGY_CAPITAL = Decimal("150000")  # INR total capital
 CAPITAL_PER_POSITION = Decimal("3000")  # INR per position (₹3,000 each trade)
-MAX_POSITIONS = 33  # Max 33 positions
+MAX_POSITIONS = 50  # Max 50 positions
 SCAN_INTERVAL_SECONDS = 60  # Check list every 1 minute
 
 # Entry Filters
@@ -158,6 +158,9 @@ class Trade:
     execution_mode: str = "PAPER"  # PAPER or LIVE
     order_book_rank_score: Optional[float] = None  # Order book quality score at entry
     rank_gm_at_entry: Optional[float] = None  # Rank GM at time of entry
+    # Broker/order identifiers (optional)
+    order_id: Optional[str] = None
+    central_trade_id: Optional[str] = None  # trade_id used in central trade_journal (Postgres)
     
     def current_pnl_pct(self, current_price: Decimal) -> Decimal:
         """Calculate current PnL percentage."""
@@ -808,15 +811,18 @@ class StrategyDB:
     
     def get_trades_today(self) -> List[Trade]:
         """Get all trades (open + closed) for today."""
+        # Include trades that were entered today OR trades that were closed (exit_time) today
         today = date.today().isoformat()
         with self._lock:
             conn = self._get_conn()
             try:
                 cursor = conn.cursor()
                 cursor.execute("""
-                    SELECT * FROM trades WHERE trading_date = ?
+                    SELECT * FROM trades
+                    WHERE (trading_date = ?)
+                       OR (exit_time IS NOT NULL AND DATE(exit_time) = ?)
                     ORDER BY entry_time ASC
-                """, (today,))
+                """, (today, today))
                 rows = cursor.fetchall()
                 trades = []
                 for row in rows:
@@ -892,6 +898,7 @@ class StrategyDB:
     
     def get_total_pnl_today(self) -> Decimal:
         """Get total realized PnL for today."""
+        # Compute realized PnL for trades closed today (exit_time date) or trades entered and closed today
         today = date.today().isoformat()
         with self._lock:
             conn = self._get_conn()
@@ -900,19 +907,21 @@ class StrategyDB:
                 cursor.execute("""
                     SELECT COALESCE(SUM(CAST(pnl AS REAL)), 0) as total_pnl
                     FROM trades
-                    WHERE trading_date = ? AND status = 'CLOSED' AND pnl IS NOT NULL
-                """, (today,))
+                    WHERE status = 'CLOSED' AND pnl IS NOT NULL
+                      AND (DATE(exit_time) = ? OR trading_date = ?)
+                """, (today, today))
                 row = cursor.fetchone()
                 total_pnl = Decimal(str(row['total_pnl'])) if row else Decimal("0")
-                
+
                 # Also count how many closed trades
                 cursor.execute("""
                     SELECT COUNT(*) as count FROM trades
-                    WHERE trading_date = ? AND status = 'CLOSED' AND pnl IS NOT NULL
-                """, (today,))
+                    WHERE status = 'CLOSED' AND pnl IS NOT NULL
+                      AND (DATE(exit_time) = ? OR trading_date = ?)
+                """, (today, today))
                 count_row = cursor.fetchone()
                 closed_count = count_row['count'] if count_row else 0
-                
+
                 return total_pnl
             finally:
                 conn.close()
@@ -1026,6 +1035,7 @@ class MomentumStrategy:
     """
     
     def __init__(self, broker: Optional[Broker] = None, db: Optional[StrategyDB] = None, mode: str = "PAPER"):
+        """Initialize the momentum strategy engine."""
         self.broker = broker or Broker(mode=mode)
         self.db = db or StrategyDB(mode=mode)
         self.open_trades: List[Trade] = []
@@ -1033,11 +1043,21 @@ class MomentumStrategy:
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
-        self._last_scan_time: Optional[datetime] = None  # Track last scan for timer
-        
+        # Track last scan time
+        self._last_scan_time: Optional[datetime] = None
+        # Track last exit time per symbol to enforce cooldowns (symbol -> datetime)
+        self._last_exit_time: Dict[str, datetime] = {}
+        # Per-symbol GTT/trailing update control
+        self._gtt_locks: Dict[str, threading.Lock] = {}
+        self._last_gtt_update: Dict[str, datetime] = {}
+
         # Load existing open trades from DB (restart safety)
-        self._load_open_trades()
-        
+        try:
+            self._load_open_trades()
+        except Exception:
+            # If loading fails, continue with an empty open_trades list
+            self.open_trades = []
+
         logger.info(f"MomentumStrategy initialized (mode={mode}, db={self.db.db_path})")
     
     def switch_mode(self, new_mode: str):
@@ -1200,6 +1220,19 @@ class MomentumStrategy:
         Returns Trade if successful, None otherwise.
         """
         symbol = ranking.symbol
+
+        # Cooldown enforcement: if this symbol was exited recently, wait at least 3 minutes
+        try:
+            last_exit = self._last_exit_time.get(symbol)
+            if last_exit:
+                elapsed = (datetime.now() - last_exit).total_seconds()
+                COOLDOWN_SECONDS = 3 * 60  # 3 minutes
+                if elapsed < COOLDOWN_SECONDS:
+                    logger.info(f"Cooldown active for {symbol}: last exit {int(elapsed)}s ago, need {COOLDOWN_SECONDS}s")
+                    return None
+        except Exception:
+            # If anything fails, don't block entry (fail-open)
+            pass
         
         # Determine position type
         if position_type is None:
@@ -1290,7 +1323,71 @@ class MomentumStrategy:
         
         # Save to database
         trade.trade_id = self.db.save_trade(trade)
-        
+
+        # Also log to central trade_journal (Postgres) so all traders appear in the shared journal
+        try:
+            from pgAdmin_database.db_connection import pg_cursor
+            try:
+                trade_id_str = f"MOM_{str(order_result.get('order_id') or '')}_{int(time.time())}"
+            except Exception:
+                trade_id_str = f"MOM_{int(time.time())}"
+
+            try:
+                with pg_cursor() as (cur, conn):
+                    # create table if missing (keep schema compatible with app._log_trade_entry)
+                    cur.execute("""
+                        CREATE TABLE IF NOT EXISTS trade_journal (
+                            id SERIAL PRIMARY KEY,
+                            trade_id TEXT UNIQUE,
+                            symbol TEXT NOT NULL,
+                            entry_date TIMESTAMP,
+                            entry_price NUMERIC,
+                            entry_qty INTEGER,
+                            exit_date TIMESTAMP,
+                            exit_price NUMERIC,
+                            pnl NUMERIC,
+                            pnl_pct NUMERIC,
+                            duration NUMERIC,
+                            strategy TEXT,
+                            status TEXT,
+                            notes TEXT,
+                            order_id TEXT,
+                            gtt_id TEXT,
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        )
+                    """)
+
+                    cur.execute("""
+                        INSERT INTO trade_journal (trade_id, symbol, entry_date, entry_price, entry_qty, status, order_id, gtt_id, notes, strategy)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (trade_id) DO UPDATE SET updated_at = CURRENT_TIMESTAMP
+                    """, (
+                        trade_id_str,
+                        trade.symbol,
+                        trade.entry_time.isoformat(),
+                        str(trade.entry_price),
+                        int(trade.qty),
+                        'open',
+                        str(order_result.get('order_id') or ''),
+                        str(getattr(trade, 'gtt_id', None) or ''),
+                        'Auto-logged from momentum_strategy',
+                        'MOMENTUM'
+                    ))
+                    conn.commit()
+                    # Persist broker/order identifiers on the trade for reliable exit updates
+                    try:
+                        trade.order_id = str(order_result.get('order_id') or '')
+                    except Exception:
+                        trade.order_id = None
+                    trade.central_trade_id = trade_id_str
+                    logger.info(f"Logged trade to central trade_journal: {trade.symbol} trade_id={trade_id_str}")
+            except Exception as e:
+                logger.warning(f"Failed to insert momentum trade into central trade_journal: {e}")
+        except Exception:
+            # pg_cursor or psycopg2 not available - skip central logging silently
+            pass
+
         # Add to open trades
         with self._lock:
             self.open_trades.append(trade)
@@ -1518,10 +1615,82 @@ class MomentumStrategy:
         # Save to database
         logger.info(f"   Saving closed trade to DB: {trade.symbol} P{trade.position_number} - Exit: ₹{exit_price} PnL: ₹{pnl}")
         self.db.update_trade(trade)
+
+        # Update central trade_journal (Postgres) with exit data so journal reflects exits for all traders
+        updated_central = False
+        try:
+            from pgAdmin_database.db_connection import pg_cursor
+            try:
+                with pg_cursor() as (cur, conn):
+                    # Attempt to update by order_id if available, otherwise try symbol + entry_date fallback
+                    order_id_val = None
+                    try:
+                        # Try to read order id from trade attributes if present
+                        order_id_val = getattr(trade, 'order_id', None)
+                    except Exception:
+                        order_id_val = None
+
+                    timestamp = trade.exit_time.isoformat() if trade.exit_time else None
+                    pnl_val = float(trade.pnl) if trade.pnl is not None else None
+
+                    if order_id_val:
+                        cur.execute("""
+                            UPDATE trade_journal
+                            SET exit_date = %s, exit_price = %s, pnl = %s, status = %s, updated_at = CURRENT_TIMESTAMP
+                            WHERE order_id = %s AND status = 'open'
+                        """, (timestamp, str(exit_price), pnl_val, 'closed', str(order_id_val)))
+                    else:
+                        # Fallback: try to update most recent open journal entry for this symbol
+                        cur.execute("""
+                            UPDATE trade_journal
+                            SET exit_date = %s, exit_price = %s, pnl = %s, status = %s, updated_at = CURRENT_TIMESTAMP
+                            WHERE id = (
+                                SELECT id FROM trade_journal WHERE symbol = %s AND status = 'open' ORDER BY entry_date DESC LIMIT 1
+                            )
+                        """, (timestamp, str(exit_price), pnl_val, 'closed', trade.symbol))
+                    conn.commit()
+                    logger.info(f"Updated central trade_journal exit for {trade.symbol} (order_id={order_id_val})")
+                    updated_central = True
+            except Exception as e:
+                logger.warning(f"Failed to update central trade_journal for exit via pg_cursor: {e}")
+        except Exception:
+            # pg_cursor not available - will try HTTP fallback
+            pass
+
+        # Fallback: use local Flask API to log exits if direct DB update didn't succeed
+        if not updated_central:
+            try:
+                import requests
+                url = os.environ.get('WEBAPP_BASE_URL', 'http://127.0.0.1:5050') + '/api/trade-journal/log-exit'
+                payload = {
+                    'order_id': getattr(trade, 'order_id', None) or None,
+                    'symbol': trade.symbol,
+                    'exit_price': float(exit_price),
+                    'exit_qty': int(trade.qty),
+                    'exit_type': 'completed'
+                }
+                # best-effort POST; ignore network errors
+                try:
+                    r = requests.post(url, json=payload, timeout=2.0)
+                    if r.status_code == 200:
+                        logger.info(f"Logged exit via HTTP fallback for {trade.symbol} order_id={payload.get('order_id')}")
+                except Exception as he:
+                    logger.debug(f"HTTP fallback to log exit failed: {he}")
+            except Exception:
+                # requests not available or other error - ignore
+                pass
         
         # Remove from open trades
         with self._lock:
             self.open_trades = [t for t in self.open_trades if t.trade_id != trade.trade_id]
+
+        # Record last exit time for cooldown enforcement (3 minutes cooldown)
+        try:
+            if trade.symbol:
+                self._last_exit_time[trade.symbol] = datetime.now()
+                logger.debug(f"Recorded last exit time for {trade.symbol}: {self._last_exit_time[trade.symbol].isoformat()}")
+        except Exception:
+            pass
         
         # Enhanced logging with color coding for PnL
         pnl_emoji = "📈 +" if pnl >= 0 else "📉 "
@@ -1557,12 +1726,37 @@ class MomentumStrategy:
                     if trade.highest_price_since_entry is None or ltp > trade.highest_price_since_entry:
                         trade.highest_price_since_entry = ltp
                         logger.debug(f"High water mark updated for {trade.symbol}: ₹{ltp:.2f}")
-                    
-                    new_stop = trade.calculate_trailing_stop(ltp)
-                    if new_stop > trade.stop_loss:
-                        trade.stop_loss = new_stop
-                        self.db.update_trade(trade)
-                        logger.debug(f"Trailing SL updated for {trade.symbol}: ₹{new_stop:.2f}")
+
+                    # Debounce / lock per-symbol to avoid multiple simultaneous trailing updates
+                    try:
+                        lock = self._gtt_locks.setdefault(trade.symbol, threading.Lock())
+                        acquired = lock.acquire(blocking=False)
+                        if not acquired:
+                            # Another thread is already updating GTTs for this symbol; skip this update
+                            logger.debug(f"Skipping trailing update for {trade.symbol} because another update is in progress")
+                        else:
+                            try:
+                                # Short debounce: avoid updating again if we updated recently
+                                last = self._last_gtt_update.get(trade.symbol)
+                                DEBOUNCE_SECONDS = 5
+                                if last and (datetime.now() - last).total_seconds() < DEBOUNCE_SECONDS:
+                                    logger.debug(f"Debounced trailing update for {trade.symbol}; last update {(datetime.now()-last).total_seconds():.1f}s ago")
+                                else:
+                                    new_stop = trade.calculate_trailing_stop(ltp)
+                                    if new_stop > trade.stop_loss:
+                                        trade.stop_loss = new_stop
+                                        self.db.update_trade(trade)
+                                        self._last_gtt_update[trade.symbol] = datetime.now()
+                                        logger.debug(f"Trailing SL updated for {trade.symbol}: ₹{new_stop:.2f}")
+                            finally:
+                                lock.release()
+                    except Exception:
+                        # Fail-open: if locking fails, just attempt the update
+                        new_stop = trade.calculate_trailing_stop(ltp)
+                        if new_stop > trade.stop_loss:
+                            trade.stop_loss = new_stop
+                            self.db.update_trade(trade)
+                            logger.debug(f"Trailing SL updated for {trade.symbol}: ₹{new_stop:.2f}")
                 
                 # Check stop loss
                 if ltp <= trade.stop_loss:
@@ -1598,11 +1792,11 @@ class MomentumStrategy:
             logger.info(f"All {MAX_POSITIONS} positions filled, no new entries")
             return
         
-        # TIME FILTER: Only allow entries between 9:45 AM and 3:00 PM
+        # TIME FILTER: Only allow entries between 9:45 AM and 3:15 PM
         from datetime import time as dt_time
         now = datetime.now()
         market_open = dt_time(9, 45)   # 9:45 AM
-        market_close = dt_time(15, 0)  # 3:00 PM
+        market_close = dt_time(15, 15)  # 3:15 PM
         current_time = now.time()
         
         if current_time < market_open:
@@ -2151,7 +2345,61 @@ def register_strategy_routes(app):
             
             # Save to database
             strategy.db.update_trade(trade)
-            
+
+            # Update central trade_journal (Postgres) so journal reflects this booked/cleared exit
+            try:
+                from pgAdmin_database.db_connection import pg_cursor
+                try:
+                    with pg_cursor() as (cur, conn):
+                        order_id_val = None
+                        try:
+                            order_id_val = getattr(trade, 'order_id', None)
+                        except Exception:
+                            order_id_val = None
+
+                        timestamp = trade.exit_time.isoformat() if trade.exit_time else None
+                        pnl_val = float(trade.pnl) if trade.pnl is not None else None
+
+                        if order_id_val:
+                            cur.execute("""
+                                UPDATE trade_journal
+                                SET exit_date = %s, exit_price = %s, pnl = %s, status = %s, updated_at = CURRENT_TIMESTAMP
+                                WHERE order_id = %s AND status = 'open'
+                            """, (timestamp, str(trade.exit_price), pnl_val, 'closed', str(order_id_val)))
+                        else:
+                            cur.execute("""
+                                UPDATE trade_journal
+                                SET exit_date = %s, exit_price = %s, pnl = %s, status = %s, updated_at = CURRENT_TIMESTAMP
+                                WHERE id = (
+                                    SELECT id FROM trade_journal WHERE symbol = %s AND status = 'open' ORDER BY entry_date DESC LIMIT 1
+                                )
+                            """, (timestamp, str(trade.exit_price), pnl_val, 'closed', trade.symbol))
+                        conn.commit()
+                        logger.info(f"Updated central trade_journal exit (cleared) for {trade.symbol} (order_id={order_id_val})")
+                except Exception as e:
+                    logger.warning(f"Failed to update central trade_journal for clear via pg_cursor: {e}")
+            except Exception:
+                # Fallback: use local Flask API to log exits if direct DB update didn't succeed
+                try:
+                    import requests
+                    url = os.environ.get('WEBAPP_BASE_URL', 'http://127.0.0.1:5050') + '/api/trade-journal/log-exit'
+                    payload = {
+                        'order_id': getattr(trade, 'order_id', None) or None,
+                        'symbol': trade.symbol,
+                        'exit_price': float(trade.exit_price) if trade.exit_price is not None else None,
+                        'exit_qty': int(trade.qty),
+                        'exit_type': 'booked'
+                    }
+                    try:
+                        r = requests.post(url, json=payload, timeout=2.0)
+                        if r.status_code == 200:
+                            logger.info(f"Logged cleared exit via HTTP fallback for {trade.symbol} order_id={payload.get('order_id')}")
+                    except Exception as he:
+                        logger.debug(f"HTTP fallback to log cleared exit failed: {he}")
+                except Exception:
+                    # requests not available or other error - ignore
+                    pass
+
             # Remove from open trades
             with strategy._lock:
                 strategy.open_trades = [t for t in strategy.open_trades if t.trade_id != trade.trade_id]

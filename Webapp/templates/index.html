@@ -1471,7 +1471,7 @@
       return `<tr data-trade-id="${t.trade_id}">
         <td><span class="badge" style="background:#3b82f6;color:white;">P${t.position_number}</span></td>
         <td><strong>${t.symbol}</strong></td>
-        <td>${new Date(t.entry_time).toLocaleTimeString()}</td>
+        <td>${formatDateTimeShort(t.entry_time)}</td>
         <td>₹${t.entry_price?.toFixed(2) || '-'}</td>
         <td>${t.qty}</td>
         <td>₹${t.ltp?.toFixed(2) || '-'}</td>
@@ -1555,6 +1555,22 @@
     // Decrement for next tick
     if (strategyNextScanSeconds > 0) {
       strategyNextScanSeconds--;
+    }
+  }
+
+  // Format ISO datetime to '16 Jan 12:29:54 PM' (no year)
+  function formatDateTimeShort(isoStr) {
+    try {
+      if (!isoStr) return '-';
+      const d = new Date(isoStr);
+      if (isNaN(d.getTime())) return '-';
+      const day = d.getDate();
+      const month = d.toLocaleString(undefined, { month: 'short' });
+      // Force 12-hour time with seconds: '12:29:54 PM'
+      const time = d.toLocaleTimeString(undefined, { hour12: true, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      return `${day} ${month} ${time}`;
+    } catch (e) {
+      return '-';
     }
   }
 
@@ -1677,9 +1693,9 @@
         return `<tr>
           <td><span class="badge" style="background:#64748b;color:white;">P${t.position_number}</span></td>
           <td>${t.symbol}</td>
-          <td>${new Date(t.entry_time).toLocaleTimeString()}</td>
+          <td>${formatDateTimeShort(t.entry_time)}</td>
           <td>₹${t.entry_price?.toFixed(2) || '-'}</td>
-          <td>${t.exit_time ? new Date(t.exit_time).toLocaleTimeString() : '-'}</td>
+          <td>${t.exit_time ? formatDateTimeShort(t.exit_time) : '-'}</td>
           <td>₹${t.exit_price?.toFixed(2) || '-'}</td>
           <td>${t.qty}</td>
           <td style="color:${pnlColor};font-weight:600;">₹${t.pnl?.toFixed(2) || '0.00'}</td>
