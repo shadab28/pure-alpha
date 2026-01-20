@@ -832,6 +832,97 @@ def api_trades():
 				gtt_summary[ts] = entry
 			except Exception as e:
 				error_logger.debug("Silent exception ignored: %s", e)
+
+		# Also include historical trades from central trade_journal (Postgres) so
+		# the UI can display old trades and stats even when broker API doesn't
+		# return them. Format rows to match the frontend expectations.
+		# Normalize broker trades so the frontend mapping (entry_date, entry_price, entry_qty)
+		# works consistently. Many broker trade objects use different keys (average_price,
+		# fill_timestamp, quantity). Normalize those into common fields before merging
+		# with journal trades.
+		def _normalize_trade(t):
+			nt = dict(t or {})
+			# entry price candidates
+			for k in ('entry_price', 'average_price', 'fill_price', 'price', 'last_price'):
+				v = t.get(k)
+				if v is not None:
+					try:
+						nt['entry_price'] = float(v)
+						break
+					except Exception:
+						continue
+			# entry quantity
+			q = t.get('entry_qty') or t.get('qty') or t.get('quantity')
+			if q is not None:
+				try:
+					nt['entry_qty'] = int(q)
+				except Exception:
+					nt['entry_qty'] = None
+			# entry date/time
+			for k in ('entry_date', 'created_at', 'fill_timestamp', 'exchange_timestamp', 'order_timestamp'):
+				v = t.get(k)
+				if v:
+					nt['entry_date'] = v
+					break
+			# ensure trade_id/order_id present for dedupe
+			if not nt.get('trade_id'):
+				nt['trade_id'] = t.get('trade_id') or t.get('trade_id_str') or t.get('order_id')
+			return nt
+
+		trades = [_normalize_trade(t) for t in trades]
+		from pgAdmin_database.db_connection import pg_cursor
+		journal_trades = []
+		try:
+			with pg_cursor() as (cur, conn):
+				cur.execute("""
+					SELECT trade_id, symbol, entry_date, entry_price, entry_qty,
+					       exit_date, exit_price, pnl, pnl_pct, duration, strategy, status, notes, order_id
+					FROM trade_journal
+					ORDER BY COALESCE(exit_date, entry_date) DESC
+					LIMIT 1000
+				""")
+				rows = cur.fetchall()
+				for r in rows:
+					trade_id, symbol, entry_date, entry_price, entry_qty, exit_date, exit_price, pnl, pnl_pct, duration, strategy, status, notes, order_id = r
+					journal_trades.append({
+						"trade_id": trade_id,
+						"symbol": symbol,
+						"entry_date": entry_date.isoformat() if entry_date else None,
+						"entry_price": float(entry_price) if entry_price is not None else None,
+						"entry_qty": int(entry_qty) if entry_qty is not None else None,
+						"exit_date": exit_date.isoformat() if exit_date else None,
+						"exit_price": float(exit_price) if exit_price is not None else None,
+						"pnl": float(pnl) if pnl is not None else None,
+						"pnl_pct": float(pnl_pct) if pnl_pct is not None else None,
+						"duration": float(duration) if duration is not None else None,
+						"strategy": strategy,
+						"status": status,
+						"notes": notes,
+						"order_id": order_id,
+					})
+		except Exception:
+			error_logger.debug("Failed to read trade_journal for /api/trades", exc_info=True)
+
+		# Merge broker trades and journal trades. Avoid duplicates by trade_id or order_id
+		try:
+			existing_keys = set()
+			merged = []
+			for t in trades:
+				k = t.get('trade_id') or t.get('order_id') or (t.get('symbol') + '|' + str(t.get('created_at')) if t.get('symbol') and t.get('created_at') else None)
+				if k and k in existing_keys:
+					continue
+				if k:
+					existing_keys.add(k)
+				merged.append(t)
+			for jt in journal_trades:
+				k = jt.get('trade_id') or jt.get('order_id')
+				if k and k in existing_keys:
+					continue
+				merged.append(jt)
+			trades = merged
+		except Exception:
+			error_logger.debug("Failed to merge journal trades", exc_info=True)
+
 		return jsonify({"count": len(trades), "trades": trades, "gtt_by_symbol": gtt_summary})
 	except Exception as e:
 		error_logger.exception("/api/trades failed: %s", e)

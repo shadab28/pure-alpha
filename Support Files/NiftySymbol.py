@@ -54,6 +54,8 @@ stocks2026_new = [
 
 
 stocks2026 = [
+    'SILVERBEES',
+    'GOLDBEES',
     'NIFTY 50',
     'ANGELONE',
     'BANKINDIA',
@@ -97,9 +99,13 @@ stocks2026 = [
     'JSWSTEEL',
     'KAYNES',
     'KIRIINDUS',
+    'KPIGREEN'
     'MAXHEALTH',
+    'MAZDOCK',
     'MOTILALOFS',
+    'NYKAA',
     'PENIND',
+    'PGIL',
     'PGEL',
     'POONAWALLA',
     'PREMIERENE',
@@ -112,6 +118,7 @@ stocks2026 = [
     'SHAILY',
     'SHRIRAMFIN',
     'SKYGOLD',
+    'SPICEJET',
     'STYLAMIND',
     'SUPRIYA',
     'SYRMA',
@@ -125,7 +132,6 @@ stocks2026 = [
     'UPL',
     'WABAG',
     'WEBELSOLAR',
-    'WPIL',
     'YATHARTH',
     'ZAGGLE'
 ]

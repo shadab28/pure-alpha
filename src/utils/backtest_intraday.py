@@ -96,8 +96,8 @@ def compute_indicators(df_min: pd.DataFrame) -> (pd.DataFrame, pd.DataFrame):
 
     df_60['ema50'] = ema(df_60['close'], span=50)
     df_60 = df_60[['ema50']]
-    # forward fill the 60-min ema50 to 10-min index
-    df_10 = df_10.join(df_60.reindex(df_10.index, method='ffill'))
+    # align the 60-min ema50 to the 10-min index without forward-filling
+    df_10 = df_10.join(df_60.reindex(df_10.index))
     return df_10, df
 
 

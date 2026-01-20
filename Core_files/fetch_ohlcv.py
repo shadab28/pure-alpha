@@ -208,6 +208,8 @@ def main():
     parser = argparse.ArgumentParser(description='Fetch OHLCV from Kite and upsert to Postgres (supports 15m and 1d). Use --daily or --timeframes 1d for daily candles.')
     parser.add_argument('--days', type=int, default=200)
     parser.add_argument('--rows', type=int, default=None, help='Approx number of rows per symbol to fetch (overrides --days if set)')
+    parser.add_argument('--fetch-all', action='store_true', help='Do not truncate fetched candles; insert all fetched candles')
+    parser.add_argument('--keep', type=int, default=200, help='When not using --fetch-all, keep only the last N candles (default 200)')
     parser.add_argument('--timeframes', type=str, default=None, help='Comma-separated list of timeframes (e.g. 15m,1d). If omitted, uses param.yaml timeframe.')
     parser.add_argument('--daily', action='store_true', help='Fetch only 1d timeframe (daily) for the given --days')
     parser.add_argument('--workers', type=int, default=4, help='Number of parallel worker threads for symbols')
@@ -394,12 +396,18 @@ def main():
                         intraday_candles = list(c) if c else []
                         
                         if intraday_candles:
-                            # Take last 200 candles to ensure consistent data across all symbols
-                            final_15m = intraday_candles[-200:]
+                            # Optionally keep only the last N candles for consistency, or keep all fetched
+                            if args.fetch_all:
+                                final_15m = intraday_candles
+                            else:
+                                final_15m = intraday_candles[-args.keep:]
                             upsert_rows(cur, final_15m, s, '15m')
                             total = len(intraday_candles)
                             used = len(final_15m)
-                            print(f"Upserted {used} 15m candles for {s} (fetched {total}, kept last 200)")
+                            if args.fetch_all:
+                                print(f"Upserted {used} 15m candles for {s} (fetched {total}, kept all)")
+                            else:
+                                print(f"Upserted {used} 15m candles for {s} (fetched {total}, kept last {args.keep})")
                         else:
                             print(f"No 15m candles fetched for {s}")
                     except Exception as e:
@@ -415,10 +423,16 @@ def main():
                         c = _call_historical(kite, instr, start_dt, end_dt, 'day')
                         daily_candles = list(c) if c else []
                         if daily_candles:
-                            # Take last 200 candles for ~1 year of data
-                            final = daily_candles[-200:]
+                            # Take last N candles for ~1 year of data, or keep all if requested
+                            if args.fetch_all:
+                                final = daily_candles
+                            else:
+                                final = daily_candles[-args.keep:]
                             upsert_rows(cur, final, s, '1d')
-                            print(f"Upserted {len(final)} daily candles for {s} (last 200 days)")
+                            if args.fetch_all:
+                                print(f"Upserted {len(final)} daily candles for {s} (fetched {len(daily_candles)}, kept all)")
+                            else:
+                                print(f"Upserted {len(final)} daily candles for {s} (last {args.keep} days)")
                     except Exception as e:
                         print(f"Warning: Failed to fetch daily data for {s}: {e}")
         
