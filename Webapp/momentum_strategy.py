@@ -42,7 +42,7 @@ MAX_POSITIONS = 50  # Max 50 positions
 SCAN_INTERVAL_SECONDS = 60  # Check list every 1 minute
 
 # Entry Filters
-MIN_RANK_GM_THRESHOLD = 2.5  # HARD filter: Only trade when Rank_GM > 2.5
+MIN_RANK_GM_THRESHOLD = 1.5  # HARD filter: Only trade when Rank_GM > 2.5
 
 # Position-specific rules
 POSITION_1_STOP_LOSS_PCT = Decimal("-2.5")    # Fixed -2.5% from entry (50% reduction)
@@ -179,14 +179,26 @@ class Trade:
             return self.stop_loss
         
         # Use the highest price to calculate trail stop (5% below highest)
-        if self.highest_price_since_entry is None:
-            # Fallback to entry price if not set
-            highest = self.entry_price
+        # Fallback to entry price if not set
+        highest = self.highest_price_since_entry or self.entry_price
+
+        # Ensure trailing responds to the observed current price as well
+        try:
+            observed = Decimal(current_price)
+        except Exception:
+            observed = highest
+
+        # Use the maximum of recorded highest and observed current price
+        highest_for_calc = max(highest, observed)
+
+        # Choose position-specific trail percentage
+        if self.position_number == 2:
+            trail_pct = POSITION_2_STOP_LOSS_PCT
         else:
-            highest = self.highest_price_since_entry
-        
-        # Trail stop is 5% below highest price
-        trail_stop = highest * (Decimal("1") + POSITION_2_STOP_LOSS_PCT / Decimal("100"))
+            trail_pct = POSITION_3_STOP_LOSS_PCT
+
+        # Trail stop is trail_pct below the selected highest price
+        trail_stop = highest_for_calc * (Decimal("1") + trail_pct / Decimal("100"))
         
         # Stop can only move up, never down
         return max(self.stop_loss, trail_stop)
@@ -197,7 +209,8 @@ class RankingRow:
     """Represents a row from the ranking table."""
     symbol: str
     rank: float
-    rank_gm: float  # Rank GM for filtering (HARD filter: must be > 3)
+    rank_gm: float  # Rank GM (base geometric mean)
+    rank_final: float  # Rank_Final (Rank_GM + accel_weight × acceleration)
     last_price: Decimal
     lot_size: int
     volume_ratio: float
@@ -427,7 +440,8 @@ class Broker:
         symbol: str,
         qty: int,
         side: OrderSide = OrderSide.BUY,
-        price: Optional[Decimal] = None
+        price: Optional[Decimal] = None,
+        ranking: Optional["RankingRow"] = None
     ) -> Dict[str, Any]:
         """
         Place an order (BUY or SELL).
@@ -473,8 +487,11 @@ class Broker:
         
         if self.mode == "PAPER":
             # Simulate immediate fill
+            extra = ""
+            if ranking:
+                extra = f" | Rank_GM={ranking.rank_gm:.2f} Rank_Final={ranking.rank_final:.2f} OB_Score={ranking.order_book_rank_score or 0:.2f}"
             logger.info(
-                f"[PAPER] {side.value} Order: {symbol} qty={qty} @ ₹{exec_price}"
+                f"[PAPER] {side.value} Order: {symbol} qty={qty} @ ₹{exec_price}" + extra
             )
             return {
                 "order_id": order_id,
@@ -506,7 +523,10 @@ class Broker:
                     price=limit_price
                 )
                 
-                logger.info(f"[LIVE] {side.value} LIMIT Order: {symbol} qty={qty} @ ₹{limit_price:.2f} (mid-price) | Order ID: {live_order_id}")
+                extra = ""
+                if ranking:
+                    extra = f" | Rank_GM={ranking.rank_gm:.2f} Rank_Final={ranking.rank_final:.2f} OB_Score={ranking.order_book_rank_score or 0:.2f}"
+                logger.info(f"[LIVE] {side.value} LIMIT Order: {symbol} qty={qty} @ ₹{limit_price:.2f} (mid-price) | Order ID: {live_order_id}" + extra)
                 
                 return {
                     "order_id": str(live_order_id),
@@ -537,7 +557,10 @@ class Broker:
                             order_type=kite.ORDER_TYPE_LIMIT,
                             price=rounded_retry
                         )
-                        logger.info(f"[LIVE] RETRY {side.value} LIMIT Order: {symbol} qty={qty} @ ₹{rounded_retry:.2f} | Order ID: {live_order_id}")
+                        extra = ""
+                        if ranking:
+                            extra = f" | Rank_GM={ranking.rank_gm:.2f} Rank_Final={ranking.rank_final:.2f} OB_Score={ranking.order_book_rank_score or 0:.2f}"
+                        logger.info(f"[LIVE] RETRY {side.value} LIMIT Order: {symbol} qty={qty} @ ₹{rounded_retry:.2f} | Order ID: {live_order_id}" + extra)
                         return {
                             "order_id": str(live_order_id),
                             "status": "COMPLETE",
@@ -563,7 +586,8 @@ class Broker:
         target_price: float,
         qty: int,
         order_type: str = "SELL",
-        label: str = ""
+        label: str = "",
+        ranking: Optional["RankingRow"] = None
     ) -> Dict[str, Any]:
         """
         Place a GTT (Good Till Triggered) order.
@@ -572,7 +596,10 @@ class Broker:
         In LIVE mode, places real GTT via Kite API.
         """
         if self.mode == "PAPER":
-            logger.info(f"[PAPER] GTT {label}: {symbol} qty={qty} trigger=₹{trigger_price:.2f}")
+            extra = ""
+            if ranking:
+                extra = f" | Rank_GM={ranking.rank_gm:.2f} Rank_Final={ranking.rank_final:.2f} OB_Score={ranking.order_book_rank_score or 0:.2f}"
+            logger.info(f"[PAPER] GTT {label}: {symbol} qty={qty} trigger=₹{trigger_price:.2f}" + extra)
             return {"status": "SUCCESS", "gtt_id": f"GTT_PAPER_{self._order_id_counter}"}
         else:
             try:
@@ -599,7 +626,10 @@ class Broker:
                     }]
                 )
 
-                logger.info(f"[LIVE] GTT {label}: {symbol} qty={qty} trigger=₹{trigger_dec:.2f} | GTT ID: {gtt_id}")
+                extra = ""
+                if ranking:
+                    extra = f" | Rank_GM={ranking.rank_gm:.2f} Rank_Final={ranking.rank_final:.2f} OB_Score={ranking.order_book_rank_score or 0:.2f}"
+                logger.info(f"[LIVE] GTT {label}: {symbol} qty={qty} trigger=₹{trigger_dec:.2f} | GTT ID: {gtt_id}" + extra)
                 return {"status": "SUCCESS", "gtt_id": str(gtt_id)}
             except Exception as e:
                 err_text = str(e)
@@ -626,7 +656,10 @@ class Broker:
                                 "price": target_retry
                             }]
                         )
-                        logger.info(f"[LIVE] GTT RETRY {label}: {symbol} qty={qty} trigger=₹{trigger_retry:.2f} | GTT ID: {gtt_id}")
+                        extra = ""
+                        if ranking:
+                            extra = f" | Rank_GM={ranking.rank_gm:.2f} Rank_Final={ranking.rank_final:.2f} OB_Score={ranking.order_book_rank_score or 0:.2f}"
+                        logger.info(f"[LIVE] GTT RETRY {label}: {symbol} qty={qty} trigger=₹{trigger_retry:.2f} | GTT ID: {gtt_id}" + extra)
                         return {"status": "SUCCESS", "gtt_id": str(gtt_id)}
                 except Exception as e2:
                     logger.error(f"Retry GTT after tick-size parse failed for {symbol}: {e2}")
@@ -673,7 +706,7 @@ class StrategyDB:
             try:
                 cursor = conn.cursor()
                 
-                # Trades table
+                # Trades table (includes extra metadata columns for order/GTT and ranking)
                 cursor.execute("""
                     CREATE TABLE IF NOT EXISTS trades (
                         trade_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -689,7 +722,11 @@ class StrategyDB:
                         position_number INTEGER NOT NULL,
                         status TEXT NOT NULL DEFAULT 'OPEN',
                         highest_price_since_entry TEXT,
-                        trading_date TEXT NOT NULL
+                        trading_date TEXT NOT NULL,
+                        order_id TEXT,
+                        gtt_id TEXT,
+                        rank_gm_at_entry TEXT,
+                        order_book_rank_score REAL
                     )
                 """)
                 
@@ -716,6 +753,23 @@ class StrategyDB:
                 
                 conn.commit()
                 logger.info(f"Database initialized at {self.db_path}")
+                # Schema migration for existing DBs: ensure extra columns exist
+                try:
+                    cursor.execute("PRAGMA table_info(trades)")
+                    cols = {r[1] for r in cursor.fetchall()}
+                    extra_cols = [
+                        ("order_id", "TEXT"),
+                        ("gtt_id", "TEXT"),
+                        ("rank_gm_at_entry", "TEXT"),
+                        ("order_book_rank_score", "REAL")
+                    ]
+                    for name, ctype in extra_cols:
+                        if name not in cols:
+                            cursor.execute(f"ALTER TABLE trades ADD COLUMN {name} {ctype}")
+                    conn.commit()
+                except Exception:
+                    # Non-fatal migration errors should not block startup
+                    logger.debug("Schema migration for trades table skipped/failed")
             finally:
                 conn.close()
     
@@ -728,8 +782,9 @@ class StrategyDB:
                 cursor.execute("""
                     INSERT INTO trades (
                         symbol, entry_time, entry_price, qty, stop_loss, target,
-                        position_number, status, highest_price_since_entry, trading_date
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        position_number, status, highest_price_since_entry, trading_date,
+                        order_id, gtt_id, rank_gm_at_entry, order_book_rank_score
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     trade.symbol,
                     trade.entry_time.isoformat(),
@@ -740,7 +795,11 @@ class StrategyDB:
                     trade.position_number,
                     trade.status.value,
                     str(trade.highest_price_since_entry) if trade.highest_price_since_entry else None,
-                    trade.entry_time.date().isoformat()
+                    trade.entry_time.date().isoformat(),
+                    getattr(trade, 'order_id', None),
+                    getattr(trade, 'gtt_id', None),
+                    str(getattr(trade, 'rank_gm_at_entry', None)) if getattr(trade, 'rank_gm_at_entry', None) is not None else None,
+                    float(getattr(trade, 'order_book_rank_score', None)) if getattr(trade, 'order_book_rank_score', None) is not None else None
                 ))
                 conn.commit()
                 trade_id = cursor.lastrowid
@@ -762,7 +821,11 @@ class StrategyDB:
                         exit_price = ?,
                         pnl = ?,
                         status = ?,
-                        highest_price_since_entry = ?
+                        highest_price_since_entry = ?,
+                        order_id = ?,
+                        gtt_id = ?,
+                        rank_gm_at_entry = ?,
+                        order_book_rank_score = ?
                     WHERE trade_id = ?
                 """, (
                     str(trade.stop_loss),
@@ -771,6 +834,10 @@ class StrategyDB:
                     str(trade.pnl) if trade.pnl else None,
                     trade.status.value,
                     str(trade.highest_price_since_entry) if trade.highest_price_since_entry else None,
+                    getattr(trade, 'order_id', None),
+                    getattr(trade, 'gtt_id', None),
+                    str(getattr(trade, 'rank_gm_at_entry', None)) if getattr(trade, 'rank_gm_at_entry', None) is not None else None,
+                    float(getattr(trade, 'order_book_rank_score', None)) if getattr(trade, 'order_book_rank_score', None) is not None else None,
                     trade.trade_id
                 ))
                 conn.commit()
@@ -981,7 +1048,12 @@ def get_live_rankings() -> List[RankingRow]:
                 # Get rank from LTP data (rank_gm field)
                 ltp_info = ltp_dict.get(symbol, {})
                 rank = ltp_info.get('rank_gm', 0) or 0
-                rank_gm = float(rank)  # Store actual rank_gm value for filtering
+                rank_gm = float(rank)  # base geometric-mean rank
+                # Prefer acceleration-enhanced final score if available
+                rank_final_val = ltp_info.get('rank_final')
+                if rank_final_val is None:
+                    rank_final_val = rank_gm
+                rank_final = float(rank_final_val)
                 
                 # Volume ratio from LTP data
                 volume_ratio = ltp_info.get('volume_ratio', 1.0) or 1.0
@@ -996,6 +1068,7 @@ def get_live_rankings() -> List[RankingRow]:
                     symbol=symbol,
                     rank=float(rank),
                     rank_gm=rank_gm,
+                    rank_final=rank_final,
                     last_price=Decimal(str(last_price)),
                     lot_size=lot_size,
                     volume_ratio=float(volume_ratio),
@@ -1005,10 +1078,10 @@ def get_live_rankings() -> List[RankingRow]:
                 logger.debug(f"Skipping {symbol}: {e}")
                 continue
         
-        # Sort by rank descending (higher rank = better)
-        rankings.sort(key=lambda r: r.rank, reverse=True)
+        # Sort by rank_final descending (higher score = better)
+        rankings.sort(key=lambda r: r.rank_final if hasattr(r, 'rank_final') else r.rank, reverse=True)
         return rankings
-        
+
     except ImportError as e:
         logger.warning(f"Cannot import ltp_service: {e}")
         return []
@@ -1043,10 +1116,18 @@ class MomentumStrategy:
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
+
         # Track last scan time
         self._last_scan_time: Optional[datetime] = None
+
         # Track last exit time per symbol to enforce cooldowns (symbol -> datetime)
+        # Primary source is centralized `Webapp.cooldown`, but keep an in-memory map
+        # for quick local checks and logging compatibility.
         self._last_exit_time: Dict[str, datetime] = {}
+        # Import centralized cooldown helper lazily to avoid import cycles during tests
+        from Webapp import cooldown as _cooldown_module
+        self._cooldown = _cooldown_module
+
         # Per-symbol GTT/trailing update control
         self._gtt_locks: Dict[str, threading.Lock] = {}
         self._last_gtt_update: Dict[str, datetime] = {}
@@ -1200,12 +1281,36 @@ class MomentumStrategy:
     
     def _calculate_stop_loss(self, entry_price: Decimal, position_number: int) -> Decimal:
         """Calculate initial stop loss: -5% from entry."""
-        sl_pct = POSITION_1_STOP_LOSS_PCT  # -5% for all positions
+        # Use position-specific stop loss percentages
+        if position_number == 1:
+            sl_pct = POSITION_1_STOP_LOSS_PCT
+        elif position_number == 2:
+            sl_pct = POSITION_2_STOP_LOSS_PCT
+        elif position_number == 3:
+            sl_pct = POSITION_3_STOP_LOSS_PCT
+        else:
+            sl_pct = POSITION_1_STOP_LOSS_PCT
+
         return entry_price * (Decimal("1") + sl_pct / Decimal("100"))
     
     def _calculate_target(self, entry_price: Decimal, position_number: int) -> Optional[Decimal]:
-        """Calculate target: +10% from entry."""
-        target_pct = POSITION_1_TARGET_PCT  # +10% for all positions
+        """Calculate position-specific target.
+
+        Returns None when the configured target percentage for the position is None
+        (i.e., runner positions with no fixed target).
+        """
+        if position_number == 1:
+            target_pct = POSITION_1_TARGET_PCT
+        elif position_number == 2:
+            target_pct = POSITION_2_TARGET_PCT
+        elif position_number == 3:
+            target_pct = POSITION_3_TARGET_PCT
+        else:
+            target_pct = POSITION_1_TARGET_PCT
+
+        if target_pct is None:
+            return None
+
         return entry_price * (Decimal("1") + target_pct / Decimal("100"))
     
     def open_position(self, ranking: RankingRow, position_type: int = None) -> Optional[Trade]:
@@ -1223,16 +1328,23 @@ class MomentumStrategy:
 
         # Cooldown enforcement: if this symbol was exited recently, wait at least 3 minutes
         try:
-            last_exit = self._last_exit_time.get(symbol)
-            if last_exit:
-                elapsed = (datetime.now() - last_exit).total_seconds()
-                COOLDOWN_SECONDS = 3 * 60  # 3 minutes
-                if elapsed < COOLDOWN_SECONDS:
-                    logger.info(f"Cooldown active for {symbol}: last exit {int(elapsed)}s ago, need {COOLDOWN_SECONDS}s")
-                    return None
+            # Prefer centralized cooldown check; fall back to local map if needed
+            allowed, remaining = self._cooldown.is_allowed(symbol, cooldown_seconds=3 * 60)
+            if not allowed:
+                logger.info(f"Cooldown active for {symbol}: last exit {int((3*60) - (remaining or 0))}s ago, need {3*60}s")
+                return None
         except Exception:
-            # If anything fails, don't block entry (fail-open)
-            pass
+            try:
+                last_exit = self._last_exit_time.get(symbol)
+                if last_exit:
+                    elapsed = (datetime.now() - last_exit).total_seconds()
+                    COOLDOWN_SECONDS = 3 * 60  # 3 minutes
+                    if elapsed < COOLDOWN_SECONDS:
+                        logger.info(f"Cooldown active for {symbol}: last exit {int(elapsed)}s ago, need {COOLDOWN_SECONDS}s")
+                        return None
+            except Exception:
+                # If anything fails, don't block entry (fail-open)
+                pass
         
         # Determine position type
         if position_type is None:
@@ -1250,9 +1362,11 @@ class MomentumStrategy:
         # SAFETY ENFORCEMENT for LIVE mode
         if self.broker.mode == "LIVE":
             # Block if Rank_GM is below threshold
-            if ranking.rank_gm <= MIN_RANK_GM_THRESHOLD:
+            # Use acceleration-enhanced Rank_Final when available
+            rank_to_check = getattr(ranking, 'rank_final', None) or getattr(ranking, 'rank_gm', 0)
+            if rank_to_check <= MIN_RANK_GM_THRESHOLD:
                 logger.warning(
-                    f"[LIVE SAFETY] Blocked {symbol}: Rank_GM ({ranking.rank_gm:.2f}) <= "
+                    f"[LIVE SAFETY] Blocked {symbol}: Rank_Final ({rank_to_check:.2f}) <= "
                     f"MIN_THRESHOLD ({MIN_RANK_GM_THRESHOLD})"
                 )
                 return None
@@ -1290,13 +1404,13 @@ class MomentumStrategy:
                 logger.warning(f"[LIVE SAFETY] Blocked {symbol}: Target undefined for P{position_type}")
                 return None
         
-        # Place order
-        order_result = self.broker.place_order(symbol, qty, OrderSide.BUY)
-        
+        # Place order (pass ranking so place_order can log momentum signals)
+        order_result = self.broker.place_order(symbol, qty, OrderSide.BUY, ranking=ranking)
+
         if order_result['status'] != 'COMPLETE':
             logger.warning(f"Order failed for {symbol}: {order_result.get('reason', 'Unknown')}")
             return None
-        
+
         fill_price = order_result['fill_price']
         fill_qty = order_result['fill_qty']
         
@@ -1447,16 +1561,28 @@ class MomentumStrategy:
             )
         
         elif position_type == 2:
-            # P2: Trailing SL and Fixed Target in OCO
-            self._place_gtt_oco(
-                symbol=symbol,
-                qty=qty,
-                position_type=2,
-                stop_price=float(trade.stop_loss),
-                target_price=float(trade.target),
-                is_trailing_sl=True,
-                trade=trade
-            )
+            # P2: Trailing SL. If a target is configured use OCO, otherwise place SL-only (runner)
+            if trade.target is None:
+                # Runner: only SL (trailing)
+                self._place_gtt_stop_only(
+                    symbol=symbol,
+                    qty=qty,
+                    position_type=2,
+                    stop_price=float(trade.stop_loss),
+                    is_trailing_sl=True,
+                    trade=trade
+                )
+            else:
+                # Fixed target configured: place OCO
+                self._place_gtt_oco(
+                    symbol=symbol,
+                    qty=qty,
+                    position_type=2,
+                    stop_price=float(trade.stop_loss),
+                    target_price=float(trade.target),
+                    is_trailing_sl=True,
+                    trade=trade
+                )
         
         elif position_type == 3:
             # P3: Only Trailing SL (no target)
@@ -1518,10 +1644,11 @@ class MomentumStrategy:
             )
             
             trade.gtt_id = str(gtt_id)
+            extra = f" | Rank_GM_at_entry={getattr(trade, 'rank_gm_at_entry', 0):.2f} OB_Score={getattr(trade, 'order_book_rank_score', 0) or 0:.2f}"
             logger.info(
                 f"   ✓ GTT OCO P{position_type} {symbol}: "
                 f"SL @ ₹{stop_price:.2f} (trailing={is_trailing_sl}), "
-                f"Target @ ₹{target_price:.2f} | GTT ID: {gtt_id}"
+                f"Target @ ₹{target_price:.2f} | GTT ID: {gtt_id}" + extra
             )
         
         except Exception as e:
@@ -1570,9 +1697,10 @@ class MomentumStrategy:
             )
             
             trade.gtt_id = str(gtt_id)
+            extra = f" | Rank_GM_at_entry={getattr(trade, 'rank_gm_at_entry', 0):.2f} OB_Score={getattr(trade, 'order_book_rank_score', 0) or 0:.2f}"
             logger.info(
                 f"   ✓ GTT SL-ONLY P{position_type} {symbol}: "
-                f"SL @ ₹{stop_price:.2f} (trailing={is_trailing_sl}) | GTT ID: {gtt_id}"
+                f"SL @ ₹{stop_price:.2f} (trailing={is_trailing_sl}) | GTT ID: {gtt_id}" + extra
             )
         
         except Exception as e:
@@ -1687,7 +1815,14 @@ class MomentumStrategy:
         # Record last exit time for cooldown enforcement (3 minutes cooldown)
         try:
             if trade.symbol:
-                self._last_exit_time[trade.symbol] = datetime.now()
+                now = datetime.now()
+                self._last_exit_time[trade.symbol] = now
+                # Also update the centralized cooldown store so API-level checks observe it
+                try:
+                    self._cooldown.record(trade.symbol)
+                except Exception:
+                    # Non-fatal; log and continue
+                    logger.debug("Failed to record centralized cooldown for %s", trade.symbol)
                 logger.debug(f"Recorded last exit time for {trade.symbol}: {self._last_exit_time[trade.symbol].isoformat()}")
         except Exception:
             pass
@@ -1728,8 +1863,8 @@ class MomentumStrategy:
                         logger.debug(f"High water mark updated for {trade.symbol}: ₹{ltp:.2f}")
 
                     # Debounce / lock per-symbol to avoid multiple simultaneous trailing updates
+                    lock = self._gtt_locks.setdefault(trade.symbol, threading.Lock())
                     try:
-                        lock = self._gtt_locks.setdefault(trade.symbol, threading.Lock())
                         acquired = lock.acquire(blocking=False)
                         if not acquired:
                             # Another thread is already updating GTTs for this symbol; skip this update
@@ -1740,23 +1875,52 @@ class MomentumStrategy:
                                 last = self._last_gtt_update.get(trade.symbol)
                                 DEBOUNCE_SECONDS = 5
                                 if last and (datetime.now() - last).total_seconds() < DEBOUNCE_SECONDS:
-                                    logger.debug(f"Debounced trailing update for {trade.symbol}; last update {(datetime.now()-last).total_seconds():.1f}s ago")
+                                    elapsed = (datetime.now() - last).total_seconds()
+                                    logger.debug(
+                                        f"Debounced trailing update for {trade.symbol}; last update {elapsed:.1f}s ago | "
+                                        f"current_stop=₹{trade.stop_loss:.2f} | highest=₹{trade.highest_price_since_entry:.2f} | ltp=₹{ltp:.2f}"
+                                    )
                                 else:
+                                    # Compute proposed new stop. Only log when the stop actually moves.
+                                    old_stop = trade.stop_loss
                                     new_stop = trade.calculate_trailing_stop(ltp)
-                                    if new_stop > trade.stop_loss:
+                                    if new_stop > old_stop:
                                         trade.stop_loss = new_stop
-                                        self.db.update_trade(trade)
+                                        try:
+                                            self.db.update_trade(trade)
+                                        except Exception:
+                                            logger.debug(f"DB update failed while saving trailing SL for {trade.symbol}")
                                         self._last_gtt_update[trade.symbol] = datetime.now()
-                                        logger.debug(f"Trailing SL updated for {trade.symbol}: ₹{new_stop:.2f}")
+                                        # Colorize the info message for visual scans (green)
+                                        GREEN = "\u001b[32m"
+                                        RESET = "\u001b[0m"
+                                        logger.info(
+                                            GREEN + f"Trailing SL updated for {trade.symbol}: ₹{new_stop:.2f} (was ₹{old_stop:.2f})" + RESET
+                                        )
+                                    else:
+                                        # Do not log when stop is unchanged to reduce noise
+                                        pass
                             finally:
                                 lock.release()
                     except Exception:
-                        # Fail-open: if locking fails, just attempt the update
-                        new_stop = trade.calculate_trailing_stop(ltp)
-                        if new_stop > trade.stop_loss:
-                            trade.stop_loss = new_stop
-                            self.db.update_trade(trade)
-                            logger.debug(f"Trailing SL updated for {trade.symbol}: ₹{new_stop:.2f}")
+                        # Fail-open: if locking fails, just attempt the update (best-effort)
+                        try:
+                            new_stop = trade.calculate_trailing_stop(ltp)
+                            old_stop = trade.stop_loss
+                            if new_stop > old_stop:
+                                trade.stop_loss = new_stop
+                                try:
+                                    self.db.update_trade(trade)
+                                except Exception:
+                                    logger.debug(f"DB update failed while saving trailing SL for {trade.symbol} (fail-open)")
+                                self._last_gtt_update[trade.symbol] = datetime.now()
+                                GREEN = "\u001b[32m"
+                                RESET = "\u001b[0m"
+                                logger.info(
+                                    GREEN + f"Trailing SL updated for {trade.symbol}: ₹{new_stop:.2f} (was ₹{old_stop:.2f})" + RESET
+                                )
+                        except Exception:
+                            logger.debug(f"Trailing SL calculation failed for {trade.symbol} in fail-open path")
                 
                 # Check stop loss
                 if ltp <= trade.stop_loss:
@@ -1776,31 +1940,24 @@ class MomentumStrategy:
         """
         Scan for ONE new entry opportunity per scan cycle.
         
-        Rules:
-        1. ONE trade per scan (every 60 seconds)
-        2. Search from RANK #1 downwards (descending)
-        3. Priority: P3 > P2 > P1
-           - If a stock qualifies for P3, take P3
-           - Else if qualifies for P2, take P2
-           - Else if new stock, take P1
-        4. HARD FILTER: Rank_GM must be > MIN_RANK_GM_THRESHOLD (3)
-        5. TIME FILTER: Only enter between 9:45 AM and 3:00 PM
+                        try:
+                            new_stop = trade.calculate_trailing_stop(ltp)
+                            old_stop = trade.stop_loss
+                            if new_stop > old_stop:
+                                trade.stop_loss = new_stop
+                                try:
+    This ensures gradual position building, one trade at a time.
+    """
         
-        This ensures gradual position building, one trade at a time.
-        """
-        if self.get_position_count() >= MAX_POSITIONS:
-            logger.info(f"All {MAX_POSITIONS} positions filled, no new entries")
-            return
-        
-        # TIME FILTER: Only allow entries between 9:45 AM and 3:15 PM
+        # TIME FILTER: Only allow entries between 9:30 AM and 3:15 PM
         from datetime import time as dt_time
         now = datetime.now()
-        market_open = dt_time(9, 45)   # 9:45 AM
+        market_open = dt_time(9, 30)   # 9:30 AM
         market_close = dt_time(15, 15)  # 3:15 PM
         current_time = now.time()
         
         if current_time < market_open:
-            logger.debug(f"Entry blocked: Before market hours (current: {current_time.strftime('%H:%M')}, opens at 9:45)")
+            logger.debug(f"Entry blocked: Before market hours (current: {current_time.strftime('%H:%M')}, opens at 9:30)")
             return
         
         if current_time >= market_close:
@@ -1820,8 +1977,9 @@ class MomentumStrategy:
             symbol = ranking.symbol
             rank_num = i + 1
             
-            # HARD FILTER: Reject if Rank_GM <= MIN_RANK_GM_THRESHOLD
-            if ranking.rank_gm <= MIN_RANK_GM_THRESHOLD:
+            # HARD FILTER: Reject if Rank_Final (with acceleration) <= MIN_RANK_GM_THRESHOLD
+            rank_check = getattr(ranking, 'rank_final', None) or getattr(ranking, 'rank_gm', 0)
+            if rank_check <= MIN_RANK_GM_THRESHOLD:
                 # Silent rejection - don't log rejected trades to reduce console noise
                 continue
             
@@ -1843,7 +2001,7 @@ class MomentumStrategy:
                     avg_pnl = (p1_pnl + p2_pnl) / 2
                     if avg_pnl >= POSITION_3_ENTRY_CONDITION_AVG_PNL:
                         eligible_type = 3
-                        logger.debug(f"Rank #{rank_num} {symbol}: P3 eligible (avg PnL={avg_pnl:.2f}%, Rank_GM={ranking.rank_gm:.2f})")
+                        logger.debug(f"Rank #{rank_num} {symbol}: P3 eligible (avg PnL={avg_pnl:.2f}%, Rank_Final={rank_check:.2f})")
             
             # Check P2 eligibility (medium priority)
             elif 1 in existing_types and 2 not in existing_types:
@@ -1853,7 +2011,7 @@ class MomentumStrategy:
                     p1_pnl = p1_trade.current_pnl_pct(ltp)
                     if p1_pnl > POSITION_2_ENTRY_CONDITION_PNL:
                         eligible_type = 2
-                        logger.debug(f"Rank #{rank_num} {symbol}: P2 eligible (P1 PnL={p1_pnl:.2f}%, Rank_GM={ranking.rank_gm:.2f})")
+                        logger.debug(f"Rank #{rank_num} {symbol}: P2 eligible (P1 PnL={p1_pnl:.2f}%, Rank_Final={rank_check:.2f})")
             
             # Check P1 eligibility (lowest priority - no open position in this stock)
             elif not existing_types:

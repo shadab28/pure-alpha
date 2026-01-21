@@ -12,6 +12,7 @@ import threading
 import time
 from datetime import datetime, timedelta
 from typing import Dict, List, Any, Optional
+from src.ranking import calculate_acceleration, calculate_rank_final  # type: ignore
 
 REPO_ROOT = os.path.dirname(os.path.dirname(__file__))
 PARAM_PATH = os.path.join(REPO_ROOT, "Support Files", "param.yaml")
@@ -101,6 +102,10 @@ _sr_lock = threading.RLock()
 _vcp_cache: Dict[str, Dict[str, Any]] = {}
 _vcp_last_ts: Optional[datetime] = None
 _vcp_lock = threading.RLock()
+
+# Small cache to keep previous Rank_GM per-symbol for acceleration calc
+_rank_gm_cache: Dict[str, float] = {}
+_rank_gm_lock = threading.RLock()
 
 DAILY_REFRESH_SECONDS = 3600  # recompute daily MAs at most once per hour
 FIFTEEN_MIN_REFRESH_SECONDS = 60  # recompute 15m SMA200 at most once per minute
@@ -1249,6 +1254,22 @@ def fetch_ltp() -> Dict[str, Any]:
                 rank_gm = round(((g1 * g2)**0.5 - 1) * 100.0, 2)
         except Exception:
             rank_gm = None
+        # Calculate acceleration (delta vs previous Rank_GM stored in local cache)
+        acceleration = None
+        rank_final = None
+        try:
+            with _rank_gm_lock:
+                prev = _rank_gm_cache.get(sym)
+            if rank_gm is not None:
+                acceleration = None if prev is None else round(rank_gm - prev, 2)
+                # compute final score using same accel_weight as ranking module
+                rank_final = calculate_rank_final(rank_gm, acceleration, accel_weight=0.3)
+                # update cache
+                with _rank_gm_lock:
+                    _rank_gm_cache[sym] = rank_gm
+        except Exception:
+            acceleration = None
+            rank_final = rank_gm
         out[sym] = {
             "last_price": last_price,
             "last_close": last_close,
@@ -1258,6 +1279,8 @@ def fetch_ltp() -> Dict[str, Any]:
             "pct_vs_15m_sma50": pct_vs_15m_sma50,
             "pct_vs_daily_sma20": pct_vs_daily_sma20,
             "rank_gm": rank_gm,
+            "acceleration": acceleration,
+            "rank_final": rank_final,
             "drawdown_15m_200_pct": drawdown_15m_200_pct,
             "volume_ratio_d5_d200": vol_ratio,
             "days_since_golden_cross": days_since_gc,

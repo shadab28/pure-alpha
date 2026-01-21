@@ -229,40 +229,30 @@ except Exception:
 _orders_lock = threading.RLock()
 _orders_store: dict[str, dict] = {}
 
-# -------- Last stop-trigger timestamps to prevent immediate re-entry --------
-# Records when a stop-loss (or stop-triggered sell) occurs for a symbol.
-_last_stop_ts_lock = threading.RLock()
-_last_stop_ts: dict[str, datetime] = {}
+from Webapp import cooldown
 
+
+# Note: cooldown is now centralized in `Webapp.cooldown`.
 def _record_stop_trigger(symbol: str) -> None:
-	"""Record that a stop trigger/exit happened for `symbol` now.
-
-	This is used to enforce a short cooldown before taking a new entry.
-	"""
+	"""Proxy to centralized cooldown recorder."""
 	try:
 		if not symbol:
 			return
-		with _last_stop_ts_lock:
-			_last_stop_ts[symbol] = datetime.now()
-		order_logger.info("STOP_TRIGGER recorded for %s at %s", symbol, _last_stop_ts[symbol].isoformat())
+		cooldown.record(symbol)
+		ts = cooldown.get_last_timestamp(symbol)
+		if ts:
+			order_logger.info("STOP_TRIGGER recorded for %s at %s", symbol, ts.isoformat())
 	except Exception as e:
 		error_logger.warning("Failed to record stop trigger for %s: %s", symbol, e)
 
-def _can_enter_symbol(symbol: str, cooldown_seconds: int = 180) -> tuple[bool, int | None]:
-	"""Return (allowed, remaining_seconds).
 
-	allowed is True when no recent stop within cooldown_seconds. If False, remaining_seconds
-	is how many seconds left before entry is permitted.
-	"""
-	with _last_stop_ts_lock:
-		ts = _last_stop_ts.get(symbol)
-	if not ts:
+def _can_enter_symbol(symbol: str, cooldown_seconds: int = 180) -> tuple[bool, int | None]:
+	"""Proxy to centralized cooldown checker."""
+	try:
+		return cooldown.is_allowed(symbol, cooldown_seconds=cooldown_seconds)
+	except Exception:
+		# Fail-open: if cooldown check fails, allow entry
 		return True, None
-	delta = datetime.now() - ts
-	rem = cooldown_seconds - int(delta.total_seconds())
-	if rem <= 0:
-		return True, None
-	return False, rem
 
 # Cached broker orders (updated via Kite Ticker order_update), and cached GTTs
 _broker_orders_cache: dict[str, dict] = {}
@@ -903,22 +893,40 @@ def api_trades():
 		except Exception:
 			error_logger.debug("Failed to read trade_journal for /api/trades", exc_info=True)
 
-		# Merge broker trades and journal trades. Avoid duplicates by trade_id or order_id
+		# Merge broker trades and journal trades. Prefer journal_trades when a matching
+		# trade_id/order_id exists so the UI gets the complete persisted record (entry/exit/pnl).
 		try:
-			existing_keys = set()
+			def _key_of(t):
+				if not t:
+					return None
+				return t.get('trade_id') or t.get('order_id') or (t.get('symbol') + '|' + str(t.get('entry_date') or t.get('created_at') or ''))
+
+			# Keep journal_trades first (they are authoritative). Then append broker trades
+			# that don't duplicate journal records.
+			journal_keys = set()
 			merged = []
-			for t in trades:
-				k = t.get('trade_id') or t.get('order_id') or (t.get('symbol') + '|' + str(t.get('created_at')) if t.get('symbol') and t.get('created_at') else None)
-				if k and k in existing_keys:
-					continue
-				if k:
-					existing_keys.add(k)
-				merged.append(t)
 			for jt in journal_trades:
-				k = jt.get('trade_id') or jt.get('order_id')
-				if k and k in existing_keys:
-					continue
+				k = _key_of(jt)
+				if k:
+					journal_keys.add(k)
 				merged.append(jt)
+
+			# Append broker trades only when we don't already have a journal entry for the key
+			keyless = []
+			for t in trades:
+				k = _key_of(t)
+				if k:
+					if k in journal_keys:
+						continue
+					journal_keys.add(k)
+					merged.append(t)
+				else:
+					keyless.append(t)
+
+			# Append any keyless items at the end
+			if keyless:
+				merged.extend(keyless)
+
 			trades = merged
 		except Exception:
 			error_logger.debug("Failed to merge journal trades", exc_info=True)
@@ -1846,11 +1854,16 @@ def api_place_buy():
 		# Determine price basis and qty
 		price_basis = ltp
 		limit_price = None
+		original_price = None
+		tick_used = None
 		if not use_market:
 			# Tick rounding for limit entry - place at LTP
 			inst_csv = os.path.join(REPO_ROOT, os.getenv('INSTRUMENTS_CSV', os.path.join('Csvs','instruments.csv')))
 			ticks = _load_tick_sizes(inst_csv)
 			tick = ticks.get(symbol) or _fallback_tick_by_price(ltp)
+			# record inputs for API response
+			original_price = float(ltp)
+			tick_used = float(tick)
 			limit_price = _round_to_tick(ltp, tick)
 			if limit_price <= 0:
 				return jsonify({"error": "Computed price invalid"}), 400
@@ -1996,7 +2009,7 @@ def api_place_buy():
 		except Exception as je:
 			order_logger.warning("Failed to log trade journal entry for %s: %s", symbol, je)
 		
-		return jsonify({
+		resp = {
 			"status": "ok",
 			"order_id": order_id,
 			"symbol": symbol,
@@ -2004,8 +2017,16 @@ def api_place_buy():
 			"quantity": qty,
 			"gtt_id": gtt_id,
 			"gtt_placed": bool(gtt_id),
-			"message": "Limit order and GTT placed successfully" if gtt_id else "Limit order placed successfully (GTT not requested)"
-		})
+			"message": "Limit order and GTT placed successfully" if gtt_id else "Limit order placed successfully (GTT not requested)",
+		}
+		# Echo rounding details when a limit price was used
+		if original_price is not None and tick_used is not None:
+			resp.update({
+				"original_price": original_price,
+				"tick_used": tick_used,
+				"rounded_price": limit_price,
+			})
+		return jsonify(resp)
 	except Exception as e:
 		error_logger.exception("/api/order/buy failed: %s", e)
 		return jsonify({"error": str(e)}), 500
@@ -2588,6 +2609,12 @@ def api_trade_journal():
 		else:  # GET
 			symbol_filter = request.args.get('symbol')
 			days_back = int(request.args.get('days', 30))
+			fetch_all = request.args.get('all') in ('1', 'true', 'yes')
+			limit = request.args.get('limit')
+			try:
+				limit = int(limit) if limit is not None else None
+			except Exception:
+				limit = None
 			with pg_cursor() as (cur, conn):
 				# detect which timestamp-like column exists and use it
 				# inspect schema and pick only columns that actually exist so this endpoint
@@ -2601,8 +2628,47 @@ def api_trade_journal():
 				else:
 					ts_col = 'entry_date'
 
-				# Use a minimal stable set of fields to stay compatible with different DB schemas.
-				fields = ['id', 'trade_id', 'symbol', f"{ts_col} AS ts"]
+				# Build a tolerant, rich field list from schema_cols so clients get
+				# full trade details when available (entry/exit prices, qty, pnl, etc.).
+				desired = [
+					('id', 'id'),
+					('trade_id', 'trade_id'),
+					('symbol', 'symbol'),
+					# timestamp-like column will be selected as 'timestamp'
+					(ts_col, 'timestamp'),
+					('entry_price', 'entry_price'),
+					('entry_qty', 'entry_qty'),
+					('entry_date', 'entry_date'),
+					('fill_price', 'fill_price'),
+					('intended_entry_price', 'intended_entry_price'),
+					('exit_date', 'exit_date'),
+					('exit_price', 'exit_price'),
+					('pnl', 'pnl'),
+					('pnl_pct', 'pnl_pct'),
+					('duration', 'duration'),
+					('strategy', 'strategy'),
+					('status', 'status'),
+					('notes', 'notes'),
+					('setup_description', 'setup_description'),
+					('order_id', 'order_id'),
+					('side', 'side'),
+					('slippage', 'slippage'),
+					('created_at', 'created_at'),
+					('updated_at', 'updated_at'),
+				]
+
+				# Only include columns that actually exist in the DB schema
+				fields = []
+				for col, alias in desired:
+					if col in schema_cols:
+						if col == ts_col:
+							fields.append(f"{col} AS {alias}")
+						else:
+							fields.append(col)
+
+				# Ensure at least a minimal set exists
+				if not fields:
+					fields = ['id', 'trade_id', 'symbol', f"{ts_col} AS timestamp"]
 
 				base_select = "SELECT " + ", ".join(fields) + " FROM trade_journal"
 				access_logger.debug("trade_journal schema_cols=%s", schema_cols)
@@ -2611,35 +2677,85 @@ def api_trade_journal():
 				# Execute the constructed query; if the database complains about a missing
 				# column (schema mismatch), fall back to a minimal safe select to avoid 500s.
 				try:
-					if symbol_filter:
-						cur.execute(base_select + f" WHERE symbol = %s AND {ts_col} >= NOW() - INTERVAL '{days_back} days' ORDER BY {ts_col} DESC", (symbol_filter,))
+					where_clause = ''
+					params = ()
+					if not fetch_all:
+						where_clause = f" WHERE {ts_col} >= NOW() - INTERVAL '{days_back} days'"
+						if symbol_filter:
+							where_clause = f" WHERE symbol = %s AND {ts_col} >= NOW() - INTERVAL '{days_back} days'"
+							params = (symbol_filter,)
+						else:
+							params = ()
 					else:
-						cur.execute(base_select + f" WHERE {ts_col} >= NOW() - INTERVAL '{days_back} days' ORDER BY {ts_col} DESC")
+						if symbol_filter:
+							where_clause = " WHERE symbol = %s"
+							params = (symbol_filter,)
+					order_limit = f" ORDER BY {ts_col} DESC"
+					if limit:
+						order_limit += f" LIMIT {limit}"
+					cur.execute(base_select + where_clause + order_limit, params)
 				except Exception:
 					# Retry with minimal core fields only (id, trade_id, symbol, timestamp)
 					minimal_fields = [
 						'id', 'trade_id', 'symbol', f"{ts_col} AS ts"
 					]
 					minimal_select = "SELECT " + ", ".join(minimal_fields) + " FROM trade_journal"
-					if symbol_filter:
-						cur.execute(minimal_select + f" WHERE symbol = %s AND {ts_col} >= NOW() - INTERVAL '{days_back} days' ORDER BY {ts_col} DESC", (symbol_filter,))
+					where_clause = ''
+					params = ()
+					if not fetch_all:
+						where_clause = f" WHERE {ts_col} >= NOW() - INTERVAL '{days_back} days'"
+						if symbol_filter:
+							where_clause = f" WHERE symbol = %s AND {ts_col} >= NOW() - INTERVAL '{days_back} days'"
+							params = (symbol_filter,)
 					else:
-						cur.execute(minimal_select + f" WHERE {ts_col} >= NOW() - INTERVAL '{days_back} days' ORDER BY {ts_col} DESC")
+						if symbol_filter:
+							where_clause = " WHERE symbol = %s"
+							params = (symbol_filter,)
+					order_limit = f" ORDER BY {ts_col} DESC"
+					if limit:
+						order_limit += f" LIMIT {limit}"
+					cur.execute(minimal_select + where_clause + order_limit, params)
 				rows = cur.fetchall()
 				cols = [desc[0] for desc in cur.description]
 				trades = [dict(zip(cols, row)) for row in rows]
-				# normalize datetime fields to isoformat
+
+				# Normalize datetime fields to ISO strings when present
+				dt_fields = {'timestamp', 'entry_date', 'exit_date', 'created_at', 'updated_at'}
 				for trade in trades:
-					if trade.get('ts'):
-						trade['ts'] = trade['ts'].isoformat()
-					if trade.get('created_at'):
-						trade['created_at'] = trade['created_at'].isoformat()
-					if trade.get('updated_at'):
-						trade['updated_at'] = trade['updated_at'].isoformat()
-				# present timestamp as 'timestamp' for clients expecting that field
-				for t in trades:
-					if 'ts' in t:
-						t['timestamp'] = t.pop('ts')
+					for f in list(dt_fields):
+						if f in trade and trade.get(f) is not None:
+							try:
+								trade[f] = trade[f].isoformat()
+							except Exception:
+								# leave as-is if not a datetime
+								pass
+
+				# Coerce numeric-like fields into proper Python numbers for JSON serialization.
+				# Database drivers may return Decimal or numeric strings; ensure they become
+				# floats or ints so the frontend can render and compute correctly.
+				num_float_fields = ('entry_price', 'exit_price', 'pnl', 'pnl_pct', 'intended_entry_price', 'fill_price', 'slippage', 'duration')
+				num_int_fields = ('entry_qty', 'id')
+				for trade in trades:
+					for f in num_float_fields:
+						if f in trade and trade.get(f) is not None:
+							try:
+								trade[f] = float(trade[f])
+							except Exception:
+								# leave value as-is if conversion fails
+								pass
+					for f in num_int_fields:
+						if f in trade and trade.get(f) is not None:
+							try:
+								trade[f] = int(trade[f])
+							except Exception:
+								pass
+
+				# Some clients expect explicit 'entry_date' and 'timestamp' names.
+				# If we only selected a single timestamp-like column, ensure both
+				if 'entry_date' not in schema_cols and ts_col in schema_cols:
+					# alias already set to 'timestamp' above
+					pass
+
 				return jsonify(trades)
 
 	except Exception as e:
