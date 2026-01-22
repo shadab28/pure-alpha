@@ -61,6 +61,9 @@ DB_DIR = os.path.dirname(__file__)
 DB_PATH_PAPER = os.path.join(DB_DIR, "momentum_strategy_paper.db")
 DB_PATH_LIVE = os.path.join(DB_DIR, "momentum_strategy_live.db")
 
+# Debugging toggle for trailing stop behaviour. Set MOMENTUM_TRAILING_DEBUG=1 to enable
+TRAILING_DEBUG = os.getenv("MOMENTUM_TRAILING_DEBUG", "0") == "1"
+
 def get_db_path(mode: str = "PAPER") -> str:
     """Get database path based on trading mode."""
     return DB_PATH_LIVE if mode == "LIVE" else DB_PATH_PAPER
@@ -184,8 +187,9 @@ class Trade:
 
         # Ensure trailing responds to the observed current price as well
         try:
-            observed = Decimal(current_price)
-        except Exception:
+            # Ensure current_price is Decimal or convertible
+            observed = Decimal(str(current_price))
+        except (InvalidOperation, Exception):
             observed = highest
 
         # Use the maximum of recorded highest and observed current price
@@ -1329,7 +1333,8 @@ class MomentumStrategy:
         # Cooldown enforcement: if this symbol was exited recently, wait at least 3 minutes
         try:
             # Prefer centralized cooldown check; fall back to local map if needed
-            allowed, remaining = self._cooldown.is_allowed(symbol, cooldown_seconds=3 * 60)
+            # Increase cooldown to 10 minutes to reduce re-entries after exits
+            allowed, remaining = self._cooldown.is_allowed(symbol, cooldown_seconds=10 * 60)
             if not allowed:
                 logger.info(f"Cooldown active for {symbol}: last exit {int((3*60) - (remaining or 0))}s ago, need {3*60}s")
                 return None
@@ -1395,13 +1400,16 @@ class MomentumStrategy:
         stop_loss = self._calculate_stop_loss(entry_price_estimate, position_type)
         target = self._calculate_target(entry_price_estimate, position_type)
         
-        # LIVE mode safety: Ensure SL is defined (block if target undefined for non-P3)
+        # LIVE mode safety: Ensure SL is defined. For P1 we require a fixed target.
+        # P2 and P3 are allowed to run without a fixed target (treated as runners with trailing stops).
         if self.broker.mode == "LIVE":
             if stop_loss is None or stop_loss <= 0:
                 logger.warning(f"[LIVE SAFETY] Blocked {symbol}: Stop Loss undefined")
                 return None
-            if position_type != 3 and (target is None or target <= 0):
-                logger.warning(f"[LIVE SAFETY] Blocked {symbol}: Target undefined for P{position_type}")
+            # Enforce target presence only for Position 1 (fixed-target entry).
+            # Allow P2/P3 to proceed when target is None (runner mode with trailing stop).
+            if position_type == 1 and (target is None or target <= 0):
+                logger.warning(f"[LIVE SAFETY] Blocked {symbol}: Target undefined for P1 (fixed-target required)")
                 return None
         
         # Place order (pass ranking so place_order can log momentum signals)
@@ -1644,6 +1652,30 @@ class MomentumStrategy:
             )
             
             trade.gtt_id = str(gtt_id)
+            # Persist the gtt_id to the DB so other components (trailing worker) can find it
+            try:
+                self.db.update_trade(trade)
+            except Exception:
+                logger.debug(f"Failed to persist gtt_id for {symbol} after placement")
+            # Best-effort: notify the running webapp trailing manager so it can register this GTT
+            try:
+                import requests
+                webapp_base = os.environ.get('WEBAPP_BASE_URL', 'http://127.0.0.1:5050')
+                payload = {
+                    'symbol': symbol,
+                    'gtt_id': str(gtt_id),
+                    'qty': int(qty),
+                    'stop_price': float(stop_price),
+                    'gtt_type': 'oco',
+                    'target_price': float(target_price)
+                }
+                try:
+                    requests.post(webapp_base + '/api/trailing/start', json=payload, timeout=1.5)
+                except Exception:
+                    # non-fatal - trailing worker will catch up on next bootstrap or via manual start
+                    pass
+            except Exception:
+                pass
             extra = f" | Rank_GM_at_entry={getattr(trade, 'rank_gm_at_entry', 0):.2f} OB_Score={getattr(trade, 'order_book_rank_score', 0) or 0:.2f}"
             logger.info(
                 f"   ✓ GTT OCO P{position_type} {symbol}: "
@@ -1697,6 +1729,28 @@ class MomentumStrategy:
             )
             
             trade.gtt_id = str(gtt_id)
+            # Persist gtt_id to DB so trailing manager can find it later
+            try:
+                self.db.update_trade(trade)
+            except Exception:
+                logger.debug(f"Failed to persist gtt_id for {symbol} after placement")
+            # Best-effort: notify webapp trailing manager about the new single-leg GTT
+            try:
+                import requests
+                webapp_base = os.environ.get('WEBAPP_BASE_URL', 'http://127.0.0.1:5050')
+                payload = {
+                    'symbol': symbol,
+                    'gtt_id': str(gtt_id),
+                    'qty': int(qty),
+                    'stop_price': float(stop_price),
+                    'gtt_type': 'single'
+                }
+                try:
+                    requests.post(webapp_base + '/api/trailing/start', json=payload, timeout=1.5)
+                except Exception:
+                    pass
+            except Exception:
+                pass
             extra = f" | Rank_GM_at_entry={getattr(trade, 'rank_gm_at_entry', 0):.2f} OB_Score={getattr(trade, 'order_book_rank_score', 0) or 0:.2f}"
             logger.info(
                 f"   ✓ GTT SL-ONLY P{position_type} {symbol}: "
@@ -1884,6 +1938,10 @@ class MomentumStrategy:
                                     # Compute proposed new stop. Only log when the stop actually moves.
                                     old_stop = trade.stop_loss
                                     new_stop = trade.calculate_trailing_stop(ltp)
+                                    if TRAILING_DEBUG:
+                                        logger.debug(
+                                            f"TRAIL_DBG {trade.symbol}: old_stop=₹{old_stop:.4f}, highest_for_calc=₹{trade.highest_price_since_entry:.4f}, ltp=₹{ltp:.4f}, proposed_new_stop=₹{new_stop:.4f}"
+                                        )
                                     if new_stop > old_stop:
                                         trade.stop_loss = new_stop
                                         try:
@@ -1895,11 +1953,11 @@ class MomentumStrategy:
                                         GREEN = "\u001b[32m"
                                         RESET = "\u001b[0m"
                                         logger.info(
-                                            GREEN + f"Trailing SL updated for {trade.symbol}: ₹{new_stop:.2f} (was ₹{old_stop:.2f})" + RESET
+                                            GREEN + f"Trailing SL updated for {trade.symbol}: ₹{new_stop:.2f} (was ₹{old_stop:.2f}) | gtt_id={getattr(trade, 'gtt_id', None)}" + RESET
                                         )
                                     else:
-                                        # Do not log when stop is unchanged to reduce noise
-                                        pass
+                                        if TRAILING_DEBUG:
+                                            logger.debug(f"TRAIL_DBG {trade.symbol}: stop unchanged (proposed <= old)")
                             finally:
                                 lock.release()
                     except Exception:

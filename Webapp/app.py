@@ -54,6 +54,13 @@ def load_dotenv(path: str):
 # Load repo root .env before importing data service
 load_dotenv(os.path.join(REPO_ROOT, '.env'))
 
+# Trailing configuration: allow overriding the gap threshold via env var TRAIL_THRESHOLD
+# Default remains 5% for backward compatibility. Invalid values fall back to 0.05.
+try:
+	TRAIL_THRESHOLD = float(os.getenv('TRAIL_THRESHOLD', os.getenv('MOMENTUM_TRAIL_THRESHOLD', '0.05')))
+except Exception:
+	TRAIL_THRESHOLD = 0.05
+
 from ltp_service import fetch_ltp  # type: ignore
 from ltp_service import get_kite  # type: ignore
 
@@ -246,8 +253,12 @@ def _record_stop_trigger(symbol: str) -> None:
 		error_logger.warning("Failed to record stop trigger for %s: %s", symbol, e)
 
 
-def _can_enter_symbol(symbol: str, cooldown_seconds: int = 180) -> tuple[bool, int | None]:
-	"""Proxy to centralized cooldown checker."""
+def _can_enter_symbol(symbol: str, cooldown_seconds: int = 600) -> tuple[bool, int | None]:
+	"""Proxy to centralized cooldown checker.
+
+	Default cooldown is 600 seconds (10 minutes). If the cooldown module
+	fails for any reason we fail-open and allow entry.
+	"""
 	try:
 		return cooldown.is_allowed(symbol, cooldown_seconds=cooldown_seconds)
 	except Exception:
@@ -1550,10 +1561,10 @@ def _ensure_trailer_thread(kite):
 					if not isinstance(ltp, (int,float)) or ltp <= 0:
 						continue
 					
-					# Trailing logic: only modify GTT if gap between LTP and stop exceeds 5%
-					# If gap is under 5%, do nothing. If gap > 5%, bring stop back to 5% below LTP.
+					# Trailing logic: only modify GTT if gap between LTP and stop exceeds the
+					# configured threshold (env TRAIL_THRESHOLD). If gap is under threshold,
+					# do nothing. If gap > threshold, bring stop back to threshold below LTP.
 					current_trigger = st.get('trigger')
-					TRAIL_THRESHOLD = 0.05  # Fixed 5% threshold for trailing
 					
 					if current_trigger is None or current_trigger <= 0:
 						# No trigger set yet, initialize it
@@ -1566,7 +1577,9 @@ def _ensure_trailer_thread(kite):
 					
 					# Only modify if gap exceeds 5% threshold
 					if current_gap_pct <= TRAIL_THRESHOLD:
-						# Gap is within acceptable range, do nothing
+						# Gap is within acceptable range, do nothing; log debug for visibility
+						trail_logger.debug("TRAIL_SKIP symbol=%s gtt_id=%s ltp=%.2f current_stop=%.2f gap=%.3f threshold=%.3f", 
+											sym, gtt_id, ltp, current_trigger or 0.0, current_gap_pct, TRAIL_THRESHOLD)
 						continue
 					
 					# Gap exceeded 5%, bring stop back to exactly 5% below LTP
@@ -1840,8 +1853,9 @@ def api_place_buy():
 		order_logger.info("ORDER_REQ symbol=%s budget=%.2f offset=%.4f market=%s tsl=%s sl_pct=%.3f user=%s from=%s", symbol, budget, offset_pct, use_market, with_tsl, sl_pct, user.username if user else "anonymous", request.remote_addr)
 		kite = get_kite()
 
-		# Enforce cooldown after a stop-trigger for this symbol (default 3 minutes)
-		allowed, remaining = _can_enter_symbol(symbol, cooldown_seconds=180)
+		# Enforce cooldown after a stop-trigger for this symbol (default 10 minutes)
+		# Use centralized 10-minute cooldown by default
+		allowed, remaining = _can_enter_symbol(symbol, cooldown_seconds=600)
 		if not allowed:
 			order_logger.warning("ENTRY_BLOCKED_COOLDOWN symbol=%s remaining_seconds=%s", symbol, remaining)
 			return jsonify({"error": "Entry blocked: recent stop-loss/exit for this symbol. Try again later.", "retry_after_seconds": remaining}), 429
