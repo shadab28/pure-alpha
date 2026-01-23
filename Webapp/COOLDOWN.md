@@ -21,7 +21,7 @@ Public functions:
 - `record(symbol: str) -> None`
   - Record that a stop/exit happened for `symbol` at the current time.
 
-- `is_allowed(symbol: str, cooldown_seconds: int = 180) -> Tuple[bool, Optional[int]]`
+ - `is_allowed(symbol: str, cooldown_seconds: int = 600) -> Tuple[bool, Optional[int]]`
   - Returns `(allowed, remaining_seconds)` where `allowed` is True when the symbol is free to take a new entry, and `remaining_seconds` (int) tells how many seconds remain until the cooldown expires.
 
 - `get_last_timestamp(symbol: str) -> Optional[datetime]`
@@ -30,16 +30,16 @@ Public functions:
 Implementation notes:
 
 - The module uses a thread-safe `RLock` and an in-memory dictionary keyed by symbol.
-- Default cooldown is 180 seconds (3 minutes). This default is enforced by callers but can be supplied to `is_allowed()`.
+ - Default cooldown is 600 seconds (10 minutes). This default is enforced by callers but can be supplied to `is_allowed()`.
 
 ## How the API is used
 
 - `Webapp/app.py`
-  - Before accepting a buy entry (`/api/order/buy`) the endpoint calls `_can_enter_symbol(symbol, cooldown_seconds=180)` which now calls `Webapp.cooldown.is_allowed(...)`.
+  - Before accepting a buy entry (`/api/order/buy`) the endpoint calls `_can_enter_symbol(symbol, cooldown_seconds=600)` which now calls `Webapp.cooldown.is_allowed(...)`.
   - Order-update/ticker callbacks call `_record_stop_trigger(symbol)` which now calls `Webapp.cooldown.record(symbol)`.
 
 - `Webapp/momentum_strategy.py`
-  - When attempting to open a position the strategy calls `self._cooldown.is_allowed(symbol, cooldown_seconds=3 * 60)` (3 minutes).
+  - When attempting to open a position the strategy calls `self._cooldown.is_allowed(symbol, cooldown_seconds=10 * 60)` (10 minutes).
   - When the strategy closes a trade it records the exit locally and also calls `self._cooldown.record(symbol)` so the API sees the exit right away.
 
 ## Caveats & recommended follow-ups
@@ -54,7 +54,7 @@ Implementation notes:
    - `get_last_timestamp(symbol)` was added to support quick inspection and debugging. Consider adding an admin API endpoint that returns cooldown status for a small set of symbols.
 
 4. Tests
-   - Add a unit test that calls `record('FOO')`, asserts `is_allowed('FOO', cooldown_seconds=180)` returns `(False, >0)`, and simulates time advance (or monkeypatch datetime) to assert it becomes allowed after expiry.
+  - Add a unit test that calls `record('FOO')`, asserts `is_allowed('FOO', cooldown_seconds=600)` returns `(False, >0)`, and simulates time advance (or monkeypatch datetime) to assert it becomes allowed after expiry.
 
 ## Quick examples
 
@@ -62,7 +62,7 @@ Check if symbol is allowed (from code):
 
 ```py
 from Webapp import cooldown
-allowed, remaining = cooldown.is_allowed('SILVERBEES', cooldown_seconds=180)
+allowed, remaining = cooldown.is_allowed('SILVERBEES', cooldown_seconds=600)
 if not allowed:
     print('Blocked for', remaining, 'seconds')
 ```

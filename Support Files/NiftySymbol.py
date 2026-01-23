@@ -99,7 +99,7 @@ stocks2026 = [
     'JSWSTEEL',
     'KAYNES',
     'KIRIINDUS',
-    'KPIGREEN'
+    'KPIGREEN',
     'MAXHEALTH',
     'MAZDOCK',
     'MOTILALOFS',

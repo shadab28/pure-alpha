@@ -1151,29 +1151,50 @@ def fetch_ltp() -> Dict[str, Any]:
     _refresh_sr_if_needed(symbols)
     _refresh_vcp_if_needed(symbols)
 
-    # Fetch quotes with retry logic for timeout issues
+    # Fetch quotes with retry logic for transient errors (timeouts, gateway errors,
+    # and HTML/JSON-parse responses from the Kite endpoints). Treat server-side
+    # 502/503/504 and HTML responses as transient and retry with backoff.
     quote_data = None
     max_retries = 3
     retry_delay = 1  # seconds
-    
+
+    transient_indicators = [
+        "Read timed out",
+        "timeout",
+        "Couldn't parse the JSON response",
+        "<html>",
+        "504 Gateway",
+        "502 Bad Gateway",
+        "503 Service Unavailable",
+        "gateway time-out",
+        "kt-quotes",
+    ]
+
     for attempt in range(max_retries):
         try:
-            quote_data = kite.quote(list(instruments.values())) 
+            quote_data = kite.quote(list(instruments.values()))
             break  # Success, exit retry loop
         except Exception as e:
-            error_msg = str(e)
-            if "Read timed out" in error_msg or "timeout" in error_msg.lower():
+            error_msg = str(e) or repr(e)
+            lower_err = error_msg.lower()
+            is_transient = any(ind.lower() in lower_err for ind in transient_indicators)
+
+            if is_transient:
+                # Retry for transient conditions (including HTML 502/504 responses which
+                # the requests JSON parser can't handle). Use exponential backoff.
                 if attempt < max_retries - 1:
-                    wait_time = retry_delay * (attempt + 1)  # Exponential backoff
-                    logger.warning(f"Quote API timeout (attempt {attempt + 1}/{max_retries}), retrying in {wait_time}s: {error_msg}")
+                    wait_time = retry_delay * (attempt + 1)
+                    logger.warning(
+                        f"Quote API transient error (attempt {attempt + 1}/{max_retries}), retrying in {wait_time}s: {error_msg}"
+                    )
                     time.sleep(wait_time)
                     continue
                 else:
                     logger.error(f"Quote API failed after {max_retries} retries: {error_msg}")
                     raise RuntimeError(f"Quote API failed after {max_retries} retries: {error_msg}")
             else:
-                # Non-timeout error, don't retry
-                logger.error(f"Quote API failed (non-timeout): {error_msg}")
+                # Non-transient error: log full message and re-raise as runtime error
+                logger.error(f"Quote API failed (non-transient): {error_msg}")
                 raise RuntimeError(f"Quote API failed: {error_msg}")
 
     out: Dict[str, Any] = {}

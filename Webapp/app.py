@@ -13,6 +13,7 @@ from flask import Flask, jsonify, render_template, Response, request
 import time
 import threading
 import json
+import sqlite3
 
 # Allow direct execution without treating Webapp as a package
 CURRENT_DIR = os.path.dirname(__file__)
@@ -22,20 +23,165 @@ if CURRENT_DIR not in sys.path:
 if REPO_ROOT not in sys.path:
 	sys.path.insert(0, REPO_ROOT)
 
-# Import validation module from src.security
+# Import security and auth helpers from centralized src package
 try:
-	from src.security.validation import (
-		validate_symbol, validate_quantity, validate_price,
-		validate_order_type, ValidationError
-	)
-except ImportError:
-	# Fallback if validation module not available
-	class ValidationError(ValueError):
-		pass
-if CURRENT_DIR not in sys.path:
-	sys.path.append(CURRENT_DIR)
-if REPO_ROOT not in sys.path:
-	sys.path.insert(0, REPO_ROOT)
+	from src.security.security_headers import add_security_headers
+except Exception:
+	# Backwards-compat: try top-level import
+	try:
+		from security.security_headers import add_security_headers
+	except Exception:
+		# Defer error - calling code will raise if this isn't available
+		add_security_headers = lambda app: app
+
+try:
+	from src.security.auth import init_auth
+except Exception:
+	try:
+		from security.auth import init_auth
+	except Exception:
+		init_auth = lambda app: app
+
+try:
+	# import additional auth helpers used across app.py
+	from src.security.auth import require_login, User, UserRole, login_user
+except Exception:
+	try:
+		from security.auth import require_login, User, UserRole, login_user
+	except Exception:
+		# Provide no-op placeholders to avoid import-time failures in test/dev contexts
+		def require_login(required_role=None):
+			def _dec(f):
+				return f
+			return _dec
+		class User: pass
+		class UserRole:
+			TRADER = None
+		def login_user(u):
+			return None
+
+try:
+	from src.security.csrf_protection import init_csrf
+except Exception:
+	try:
+		from security.csrf_protection import init_csrf
+	except Exception:
+		init_csrf = lambda app: app
+
+try:
+	from src.security.csrf_protection import validate_csrf_token, CSRFError, generate_csrf_token
+except Exception:
+	try:
+		from security.csrf_protection import validate_csrf_token, CSRFError, generate_csrf_token
+	except Exception:
+		def validate_csrf_token(t):
+			return True
+		class CSRFError(Exception):
+			pass
+		def generate_csrf_token():
+			return ''
+
+try:
+	from src.security.csrf_protection import csrf_protect
+except Exception:
+	try:
+		from security.csrf_protection import csrf_protect
+	except Exception:
+		# no-op decorator
+		def csrf_protect(f):
+			return f
+
+# Import LTP service helper used by trailing worker and APIs
+def _resolve_fetch_ltp():
+	"""Try several import paths and return a callable fetch_ltp. Fallback to stub."""
+	candidates = ['ltp_service', 'Webapp.ltp_service', 'webapp.ltp_service']
+	for name in candidates:
+		try:
+			m = __import__(name, fromlist=['fetch_ltp'])
+			if hasattr(m, 'fetch_ltp'):
+				return m.fetch_ltp
+		except Exception:
+			continue
+	# final fallback
+	return lambda: {'data': {}}
+
+def fetch_ltp(*args, **kwargs):
+	"""Call-time resolver for fetch_ltp to avoid import path/name issues.
+
+	This tries several import paths each time it's called and falls back to a stub.
+	"""
+	try:
+		from Webapp.ltp_service import fetch_ltp as _f
+	except Exception:
+		try:
+			from ltp_service import fetch_ltp as _f
+		except Exception:
+			_f = lambda *a, **k: {'data': {}}
+	return _f(*args, **kwargs)
+
+
+# Backwards-compatible public binding: some import paths execute this module
+# under different names which caused `NameError: fetch_ltp` in runtime threads.
+# Ensure the global name `fetch_ltp` always resolves to a call-time resolver
+# that imports the authoritative implementation when available and falls
+# back to a safe stub otherwise.
+def _call_fetch_ltp(*a, **k):
+	try:
+		from Webapp.ltp_service import fetch_ltp as _f
+	except Exception:
+		try:
+			from ltp_service import fetch_ltp as _f
+		except Exception:
+			_f = lambda *aa, **kk: {"data": {}}
+	return _f(*a, **k)
+
+# Expose a stable name for the rest of this module and external callers.
+try:
+	# Overwrite the current name (ok even if it points to the wrapper above)
+	fetch_ltp = _call_fetch_ltp
+except Exception:
+	# very defensive: if assignment fails, define a simple stub
+	def fetch_ltp(*a, **k):
+		return {"data": {}}
+
+# Call-time resolver for Kite client getter to avoid NameError across import styles
+def _call_get_kite(*a, **k):
+	try:
+		from Webapp.ltp_service import get_kite as _g
+	except Exception:
+		try:
+			from ltp_service import get_kite as _g
+		except Exception:
+			# Provide a clear runtime error rather than leaving name undefined
+			def _g(*aa, **kk):
+				raise RuntimeError("kite client not available: ensure ltp_service.get_kite is importable and token.txt/configured")
+	return _g(*a, **k)
+
+# Expose stable module-level get_kite that resolves at call-time
+try:
+	get_kite = _call_get_kite
+except Exception:
+	def get_kite(*a, **k):
+		raise RuntimeError("kite client not available: ensure ltp_service.get_kite is importable and token.txt/configured")
+
+# Try to import authoritative helpers from ltp_service and bind them to module
+# globals so other code can call `get_kite()` and `fetch_ltp()` without import
+# path issues. If unavailable, provide clear runtime-failing stubs rather
+# than leaving names undefined (which caused NameError exceptions).
+try:
+	from Webapp.ltp_service import get_kite as _get_kite_impl, fetch_ltp as _fetch_impl
+	get_kite = _get_kite_impl
+	fetch_ltp = _fetch_impl
+except Exception:
+	try:
+		from ltp_service import get_kite as _get_kite_impl, fetch_ltp as _fetch_impl
+		get_kite = _get_kite_impl
+		fetch_ltp = _fetch_impl
+	except Exception:
+		# Fallback stubs: raise informative errors instead of NameError
+		def get_kite(*a, **k):
+			raise RuntimeError("kite client not available: ensure kiteconnect and token.txt are configured")
+		# fetch_ltp already has a safe wrapper above; leave it as-is
 
 def load_dotenv(path: str):
 	"""Minimal .env loader (does not overwrite existing vars)."""
@@ -46,81 +192,7 @@ def load_dotenv(path: str):
 			line = line.strip()
 			if not line or line.startswith('#') or '=' not in line:
 				continue
-			k, v = line.split('=', 1)
-			k = k.strip()
-			v = v.strip().strip("'\"")
-			os.environ.setdefault(k, v)
-
-# Load repo root .env before importing data service
-load_dotenv(os.path.join(REPO_ROOT, '.env'))
-
-# Trailing configuration: allow overriding the gap threshold via env var TRAIL_THRESHOLD
-# Default remains 5% for backward compatibility. Invalid values fall back to 0.05.
-try:
-	TRAIL_THRESHOLD = float(os.getenv('TRAIL_THRESHOLD', os.getenv('MOMENTUM_TRAIL_THRESHOLD', '0.05')))
-except Exception:
-	TRAIL_THRESHOLD = 0.05
-
-from ltp_service import fetch_ltp  # type: ignore
-from ltp_service import get_kite  # type: ignore
-
-# Import security modules
-try:
-	from src.security.security_headers import add_security_headers
-except ImportError:
-	def add_security_headers(app):
-		"""Fallback if security_headers module not available."""
-		@app.after_request
-		def set_basic_headers(response):
-			response.headers['X-Frame-Options'] = 'DENY'
-			response.headers['X-Content-Type-Options'] = 'nosniff'
-			return response
-		return app
-
-# Import authentication modules
-try:
-	from src.security.auth import (
-		init_auth, get_current_user, login_user, logout_user,
-		require_login, hash_password, verify_password, User, UserRole
-	)
-except ImportError:
-	# Fallback if auth module not available
-	def init_auth(app):
-		return app
-	def get_current_user():
-		return None
-	def login_user(user):
-		pass
-	def logout_user():
-		pass
-	def require_login(required_role=None):
-		def decorator(f):
-			return f
-		return decorator
-	def hash_password(pwd):
-		return pwd
-	def verify_password(pwd, hashed):
-		return pwd == hashed
-	class User:
-		pass
-	class UserRole:
-		pass
-
-try:
-	from src.security.csrf_protection import init_csrf, generate_csrf_token, validate_csrf_token, csrf_protect, CSRFError
-except ImportError:
-	# Fallback if CSRF module not available
-	def init_csrf(app):
-		return app
-	def generate_csrf_token():
-		return ""
-	def validate_csrf_token(token):
-		return True
-	def csrf_protect(f):
-		return f
-	class CSRFError(Exception):
-		pass
-
+ 
 app = Flask(__name__, template_folder="templates")
 
 # -------- Security Headers Setup --------
@@ -152,83 +224,75 @@ class DummyLimiter:
 
 limiter = DummyLimiter()
 
-# -------- Logging setup (date-wise subfolders) --------
-LOG_BASE_DIR = os.path.join(REPO_ROOT, 'logs')
-os.makedirs(LOG_BASE_DIR, exist_ok=True)
+from logging_config import get_logger
 
-from datetime import datetime
+# Per-component loggers (write to date-foldered files under ./logs/YYYY-MM-DD/)
+access_logger = get_logger('access', 'access.log')
+order_logger = get_logger('orders', 'orders.log')
+error_logger = get_logger('errors', 'errors.log')
+trail_logger = get_logger('trail', 'trailing.log')
 
-def _get_date_log_dir() -> str:
-	"""Get or create today's log directory: logs/2026-01-06/"""
-	today = datetime.now().strftime('%Y-%m-%d')
-	date_dir = os.path.join(LOG_BASE_DIR, today)
-	os.makedirs(date_dir, exist_ok=True)
-	return date_dir
 
-class DateFolderFileHandler(logging.FileHandler):
-	"""A file handler that writes to date-based subfolders.
-	
-	Creates structure like:
-	  logs/2026-01-06/orders.log
-	  logs/2026-01-06/trailing.log
-	  logs/2026-01-05/orders.log
-	  etc.
-	"""
-	def __init__(self, filename: str, mode='a', encoding='utf-8'):
-		self.base_filename = filename
-		self._current_date = None
-		# Initialize with today's path
-		self._update_stream()
-		super().__init__(self._get_current_path(), mode=mode, encoding=encoding)
-	
-	def _get_current_path(self) -> str:
-		return os.path.join(_get_date_log_dir(), self.base_filename)
-	
-	def _update_stream(self):
-		"""Check if date changed and update file path if needed."""
-		today = datetime.now().strftime('%Y-%m-%d')
-		if self._current_date != today:
-			self._current_date = today
-			return True
-		return False
-	
-	def emit(self, record):
-		"""Emit a record, switching to new date folder if needed."""
-		if self._update_stream():
-			# Date changed, close old stream and open new one
-			if self.stream:
-				self.stream.close()
-				self.stream = None
-			self.baseFilename = self._get_current_path()
-			os.makedirs(os.path.dirname(self.baseFilename), exist_ok=True)
-			self.stream = self._open()
-		super().emit(record)
+# -------- HTTP access & error logging middleware --------
+@app.before_request
+def _start_timer():
+	# attach start time for latency measurement
+	request._start_time = time.time()
 
-def _get_logger(name: str, filename: str) -> logging.Logger:
-	"""Create a logger that writes to date-based subfolders.
-	
-	Log files will be organized like:
-	  logs/2026-01-06/orders.log
-	  logs/2026-01-06/trailing.log
-	  logs/2026-01-06/errors.log
-	"""
-	logger = logging.getLogger(name)
-	if logger.handlers:
-		return logger
-	logger.setLevel(logging.INFO)
-	handler = DateFolderFileHandler(filename)
-	formatter = logging.Formatter('%(asctime)s %(levelname)s %(name)s - %(message)s')
-	handler.setFormatter(formatter)
-	logger.addHandler(handler)
-	return logger
 
-access_logger = _get_logger('access', 'access.log')
-order_logger = _get_logger('orders', 'orders.log')
-error_logger = _get_logger('errors', 'errors.log')
-trail_logger = _get_logger('trail', 'trailing.log')
+@app.after_request
+def _log_request(response):
+	try:
+		start = getattr(request, '_start_time', None)
+		latency = None
+		if start:
+			latency = round((time.time() - start) * 1000)  # ms
+		access_logger.info(
+			"%s %s %s %s %sms %s",
+			request.remote_addr or '-',
+			request.method,
+			request.path,
+			response.status_code,
+			latency if latency is not None else '-',
+			request.user_agent.string if hasattr(request, 'user_agent') else '-' 
+		)
+	except Exception as e:
+		# Don't crash the request on logging errors
+		error_logger.exception("Failed to log access: %s", e)
+	return response
+
+
+@app.errorhandler(Exception)
+def _handle_exception(e):
+	# Log full traceback to errors log and return JSON 500 for API paths
+	error_logger.exception("Unhandled exception during request %s %s: %s", request.method, request.path, e)
+	# For browser pages, return a generic 500 page when possible
+	if request.path.startswith('/api') or request.is_json:
+		return jsonify({"error": "internal server error"}), 500
+	try:
+		return render_template('500.html', error=str(e)), 500
+	except Exception:
+		return ("Internal Server Error", 500)
+
 # Enable debug-level tracing for trailing worker to aid diagnosis
 try:
 	trail_logger.setLevel(logging.DEBUG)
+except Exception:
+	pass
+
+# Trailing threshold: fraction below LTP to place/raise SL trigger.
+# Default is 0.1% (0.001). Can be overridden with environment variable
+# `TRAIL_THRESHOLD` or `WEBAPP_TRAIL_THRESHOLD` (provide decimal, e.g. 0.001).
+try:
+	TRAIL_THRESHOLD = float(os.environ.get('TRAIL_THRESHOLD', os.environ.get('WEBAPP_TRAIL_THRESHOLD', '0.001')))
+	# clamp to sensible range: [0.0001 (0.01%), 0.5 (50%)]
+	if TRAIL_THRESHOLD <= 0 or TRAIL_THRESHOLD > 0.5:
+		raise ValueError('out of range')
+except Exception:
+	TRAIL_THRESHOLD = 0.001
+
+try:
+	trail_logger.info("TRAIL_THRESHOLD set to %.6f", TRAIL_THRESHOLD)
 except Exception:
 	pass
 
@@ -408,7 +472,16 @@ def sse_orders():
 @app.route("/api/ltp")
 def api_ltp():
 	try:
-		return jsonify(fetch_ltp())
+		# Import at call-time to avoid NameError if module-level binding isn't present
+		try:
+			from Webapp.ltp_service import fetch_ltp as _fetch_ltp
+		except Exception:
+			try:
+				from ltp_service import fetch_ltp as _fetch_ltp
+			except Exception:
+				def _fetch_ltp():
+					return {'data': {}}
+		return jsonify(_fetch_ltp())
 	except Exception as e:
 		error_logger.exception("/api/ltp failed: %s", e)
 		return jsonify({"error": str(e)}), 500
@@ -1446,6 +1519,36 @@ def _place_bracket_oco_gtt(kite, symbol: str, qty: int, ref_price: float, target
 	)
 	return resp.get('trigger_id') or resp.get('id')
 
+
+def _extract_trigger_id(raw):
+	"""Normalize various shapes of GTT identifiers returned/stored by different clients.
+
+	Accepts ints, strings, dicts like {'trigger_id': 123}, or nested objects and
+	returns a scalar id (int or string) suitable to pass to kite.modify_gtt/delete_gtt.
+	"""
+	if raw is None:
+		return None
+	# Direct scalar
+	if isinstance(raw, (int, float, str)):
+		return raw
+	# Common dict shapes
+	try:
+		if isinstance(raw, dict):
+			for key in ('trigger_id', 'id', 'trigger', 'gtt_id'):
+				if key in raw and raw[key] is not None:
+					return raw[key]
+			# try nested values: pick first scalar-looking value
+			for v in raw.values():
+				if isinstance(v, (int, float, str)):
+					return v
+	except Exception:
+		pass
+	# Fallback to string representation
+	try:
+		return str(raw)
+	except Exception:
+		return None
+
 # ---------- Trailing GTT manager (best-effort client-side) ---------- 
 # Now keyed by gtt_id to support multiple GTTs per symbol
 _trail_lock = None
@@ -1458,6 +1561,91 @@ def _trail_lock_obj():
 		import threading
 		_trail_lock = threading.RLock()
 	return _trail_lock
+
+
+def _start_trailing(kite, symbol: str, qty: int, sl_pct: float, ltp: float = None, tick: float = None, gtt_id=None, gtt_type: str = 'single', target_pct: float = None, initial_trigger: float = None):
+	"""Register trailing state for a GTT and ensure the worker thread is running.
+
+	This function is intentionally defensive: it normalizes gtt_id shapes, computes
+	an initial trigger when possible, and never raises on import-order issues.
+	"""
+	try:
+		# Normalize inputs
+		symbol = (symbol or '').strip().upper()
+		qty = int(qty or 1)
+		sl_pct = float(sl_pct or 0.05)
+		tick = float(tick) if tick else (0.05 if (not ltp or ltp <= 0) else _fallback_tick_by_price(ltp))
+	except Exception:
+		# defensive defaults
+		symbol = (symbol or '').strip().upper()
+		qty = int(qty or 1)
+		sl_pct = float(sl_pct or 0.05)
+		tick = tick or 0.05
+
+	# normalize gtt id to a scalar/key; if missing, generate a local synthetic id
+	key = _extract_trigger_id(gtt_id)
+	if key is None:
+		import time
+		key = f"local:{symbol}:{int(time.time()*1000)}"
+
+	# compute an initial trigger if provided, else derive from ltp and TRAIL_THRESHOLD
+	trig = None
+	try:
+		if initial_trigger is not None:
+			trig = float(initial_trigger)
+		elif ltp is not None:
+			trig = _round_to_tick(float(ltp) * (1 - TRAIL_THRESHOLD), tick)
+	except Exception:
+		trig = None
+
+	# Build state dict
+	st = {
+		'symbol': symbol,
+		'qty': int(qty),
+		'sl_pct': float(sl_pct),
+		'tick': float(tick),
+		'trigger': trig,
+		'gtt_id': key,
+		'gtt_type': (gtt_type or 'single'),
+		'target_pct': float(target_pct) if target_pct is not None else None,
+		'initial_target': None,
+		'db_stop': None,
+	}
+
+	# persist initial_target when available for OCO
+	try:
+		if gtt_type == 'oco' and st.get('target_pct'):
+			if ltp:
+				st['initial_target'] = _round_to_tick(float(ltp) * (1 + st['target_pct']), st['tick'])
+	except Exception:
+		st['initial_target'] = None
+
+	# Register in global state atomically
+	try:
+		with _trail_lock_obj():
+			existing = _trail_state.get(str(key))
+			if existing:
+				# merge/refresh existing fields
+				existing.update({k: v for k, v in st.items() if v is not None})
+				_trail_state[str(key)] = existing
+			else:
+				_trail_state[str(key)] = st
+	except Exception:
+		# last-resort: set without lock
+		_trail_state[str(key)] = st
+
+	try:
+		trail_logger.info("TRAIL_STARTED symbol=%s gtt_id=%s qty=%d sl_pct=%.3f ltp=%s type=%s", symbol, key, qty, sl_pct, (ltp if ltp is not None else 'NA'), gtt_type)
+	except Exception:
+		pass
+
+	# Ensure worker thread is running; ignore if not possible
+	try:
+		_ensure_trailer_thread(kite)
+	except Exception:
+		# If _ensure_trailer_thread is not available due to import order, ignore —
+		# the worker will be started when possible elsewhere.
+		pass
 
 def _ensure_trailer_thread(kite):
 	"""Starts a background thread that raises SL GTT as price rises (no server-side trailing)."""
@@ -1561,33 +1749,47 @@ def _ensure_trailer_thread(kite):
 					if not isinstance(ltp, (int,float)) or ltp <= 0:
 						continue
 					
-					# Trailing logic: only modify GTT if gap between LTP and stop exceeds the
-					# configured threshold (env TRAIL_THRESHOLD). If gap is under threshold,
-					# do nothing. If gap > threshold, bring stop back to threshold below LTP.
+					# Trailing logic: prefer exact stop persisted by strategy (db_stop) when
+					# available. If db_stop is present and raises the current_trigger, use it.
+					# Otherwise fall back to the configured TRAIL_THRESHOLD below LTP.
 					current_trigger = st.get('trigger')
-					
+
 					if current_trigger is None or current_trigger <= 0:
-						# No trigger set yet, initialize it
+						# No trigger set yet, initialize it from LTP-based threshold
 						new_trig = _round_to_tick(ltp * (1 - TRAIL_THRESHOLD), st['tick'])
 						st['trigger'] = new_trig
 						continue
-					
-					# Calculate current gap: how far is LTP above the stop (as % of LTP)
-					current_gap_pct = (ltp - current_trigger) / ltp
-					
-					# Only modify if gap exceeds 5% threshold
-					if current_gap_pct <= TRAIL_THRESHOLD:
-						# Gap is within acceptable range, do nothing; log debug for visibility
-						trail_logger.debug("TRAIL_SKIP symbol=%s gtt_id=%s ltp=%.2f current_stop=%.2f gap=%.3f threshold=%.3f", 
-											sym, gtt_id, ltp, current_trigger or 0.0, current_gap_pct, TRAIL_THRESHOLD)
-						continue
-					
-					# Gap exceeded 5%, bring stop back to exactly 5% below LTP
-					new_trig = _round_to_tick(ltp * (1 - TRAIL_THRESHOLD), st['tick'])
-					
+
+					# If strategy wrote an exact stop to DB, prefer that when it raises the current trigger
+					db_stop = st.get('db_stop')
+					if db_stop:
+						try:
+							db_stop = float(db_stop)
+						except Exception:
+							db_stop = None
+
+					candidate_new_trig = None
+					if db_stop and db_stop > current_trigger:
+						# honor strategy's stop (rounded to tick)
+						candidate_new_trig = _round_to_tick(db_stop, st['tick'])
+						trail_logger.debug("TRAIL_DB_USE symbol=%s gtt_id=%s db_stop=%.2f current_stop=%.2f", sym, gtt_id, db_stop, current_trigger or 0.0)
+					else:
+						# Fallback: compute based on LTP and configured threshold
+						current_gap_pct = (ltp - current_trigger) / ltp
+						# Only skip when the gap is strictly smaller than the configured threshold.
+						# Treat equality as a trigger to raise the stop so a move equal to
+						# TRAIL_THRESHOLD (e.g. 0.001 == 0.1%) will update the GTT.
+						if current_gap_pct < TRAIL_THRESHOLD:
+							trail_logger.debug("TRAIL_SKIP symbol=%s gtt_id=%s ltp=%.2f current_stop=%.2f gap=%.3f threshold=%.3f", 
+												sym, gtt_id, ltp, current_trigger or 0.0, current_gap_pct, TRAIL_THRESHOLD)
+							continue
+						candidate_new_trig = _round_to_tick(ltp * (1 - TRAIL_THRESHOLD), st['tick'])
+
 					# Safety: never lower the stop, only raise it
-					if new_trig <= current_trigger:
+					if not candidate_new_trig or candidate_new_trig <= current_trigger:
 						continue
+
+					new_trig = candidate_new_trig
 					
 					# Log the trailing action
 					trail_logger.info("TRAIL_CHECK symbol=%s gtt_id=%s ltp=%.2f current_stop=%.2f gap=%.1f%% new_stop=%.2f", 
@@ -1599,7 +1801,9 @@ def _ensure_trailer_thread(kite):
 						# Diagnostic log: show state and available kite methods
 						trail_logger.debug("TRAIL_DECIDE symbol=%s gtt_id=%s has_modify=%s gtt_type=%s current_stop=%.2f new_stop=%.2f gap=%.2f ltp=%.2f st=%s",
 								sym, st.get('gtt_id'), hasattr(kite, 'modify_gtt'), gtt_type, current_trigger, new_trig, current_gap_pct*100, ltp, {k: st.get(k) for k in ('qty','sl_pct','initial_target','target_pct')})
-						if hasattr(kite, 'modify_gtt') and st.get('gtt_id'):
+						# Normalize gtt id and attempt modify; fall back to replace if modify not supported or fails
+						normalized_id = _extract_trigger_id(st.get('gtt_id'))
+						if hasattr(kite, 'modify_gtt') and normalized_id:
 							if gtt_type == 'oco':
 								# OCO GTT: update stop trigger but keep target price fixed (don't change it)
 								new_target = st.get('initial_target')  # Use original target price
@@ -1608,7 +1812,7 @@ def _ensure_trailer_thread(kite):
 									target_pct = st.get('target_pct', 0.075)
 									new_target = _round_to_tick(ltp * (1 + target_pct), st['tick'])
 								resp = kite.modify_gtt(
-									trigger_id=st['gtt_id'],
+									trigger_id=normalized_id,
 									trigger_type=kite.GTT_TYPE_OCO,
 									tradingsymbol=sym,
 									exchange='NSE',
@@ -1636,7 +1840,7 @@ def _ensure_trailer_thread(kite):
 							else:
 								# Single-leg GTT
 								resp = kite.modify_gtt(
-									trigger_id=st['gtt_id'],
+									trigger_id=normalized_id,
 									trigger_type=kite.GTT_TYPE_SINGLE,
 									tradingsymbol=sym,
 									exchange='NSE',
@@ -1652,13 +1856,21 @@ def _ensure_trailer_thread(kite):
 								)
 								trail_logger.info("TRAIL_MODIFY symbol=%s gtt_id=%s trigger=%.2f", sym, st.get('gtt_id'), new_trig)
 								trail_logger.debug("TRAIL_MODIFY_RESP symbol=%s gtt_id=%s resp=%s", sym, st.get('gtt_id'), str(resp))
-							with _trail_lock_obj():
-								st['trigger'] = new_trig
+							# Update local state from response when possible
+							try:
+								new_id = _extract_trigger_id(resp.get('trigger_id') or resp.get('id') if isinstance(resp, dict) else resp)
+								with _trail_lock_obj():
+									if new_id:
+										st['gtt_id'] = new_id
+									st['trigger'] = new_trig
+							except Exception:
+								with _trail_lock_obj():
+									st['trigger'] = new_trig
 						else:
 							# replace: delete old and place new
-							if st.get('gtt_id') and hasattr(kite, 'delete_gtt'):
+							if normalized_id and hasattr(kite, 'delete_gtt'):
 								try:
-									kite.delete_gtt(st['gtt_id'])
+									kite.delete_gtt(normalized_id)
 								except Exception as e:
 									error_logger.debug("Silent exception ignored: %s", e)
 							new_id = _place_sl_gtt(kite, sym, st['qty'], ref_price=ltp, sl_pct=st['sl_pct'])
@@ -1675,82 +1887,81 @@ def _ensure_trailer_thread(kite):
 				trail_logger.exception("TRAIL_LOOP_ERR %s", e)
 				time.sleep(30)
 
-	threading.Thread(target=worker, name="gtt_trailer", daemon=True).start()
 
-def _start_trailing(kite, symbol: str, qty: int, sl_pct: float, ltp: float, tick: float, gtt_id: str|None, gtt_type: str = 'oco', target_pct: float = 0.075, initial_trigger: float|None = None):
-	if not gtt_id:
-		trail_logger.warning("Cannot start trailing without gtt_id for %s", symbol)
-		return
-	with _trail_lock_obj():
-		# Use gtt_id as key to support multiple GTTs per symbol
-		state = _trail_state.get(str(gtt_id)) or {}
-		# Use provided initial_trigger (from existing GTT stop) or compute from LTP
-		trigger = initial_trigger if initial_trigger is not None else _round_to_tick(ltp * (1 - sl_pct), tick)
-		# Calculate initial target price (stays fixed, not recalculated on modifications)
-		initial_target = _round_to_tick(ltp * (1 + target_pct), tick) if gtt_type == 'oco' else None
-		state.update({
-			'symbol': symbol,  # Store symbol for quote lookups
-			'qty': qty,
-			'sl_pct': sl_pct,
-			'tick': tick,
-			'gtt_id': str(gtt_id),
-			'trigger': trigger,
-			'gtt_type': gtt_type,
-			'target_pct': target_pct,
-			'initial_target': initial_target,  # Store fixed target price
-		})
-		_trail_state[str(gtt_id)] = state
-		trail_logger.info("TRAIL_REGISTER gtt_id=%s symbol=%s qty=%s sl_pct=%.4f trigger=%.2f gtt_type=%s", str(gtt_id), symbol, qty, sl_pct, trigger or 0.0, gtt_type)
-	_ensure_trailer_thread(kite)
 
-# Helper function to log trade entries to the database
-def _log_trade_entry(symbol, qty, entry_price, order_id, gtt_id):
-	"""Automatically log a trade entry when order is placed."""
-	from datetime import datetime
-	from pgAdmin_database.db_connection import pg_cursor
-	
+	def _sync_trailing_from_db(db_path=None, interval=30):
+		"""Periodically read trades DB and ensure any open trades with gtt_id are registered in _trail_state.
+
+		This ensures the trailing worker can find GTTs even if the strategy's notify failed.
+		"""
+		if db_path is None:
+			db_path = os.path.join(REPO_ROOT, 'Webapp', 'momentum_strategy_live.db')
+
+		def _worker():
+			while True:
+				try:
+					if not os.path.exists(db_path):
+						time.sleep(interval)
+						continue
+					conn = sqlite3.connect(db_path)
+					conn.row_factory = sqlite3.Row
+					cur = conn.cursor()
+					cur.execute("SELECT trade_id, symbol, gtt_id, stop_loss, qty FROM trades WHERE status='OPEN' AND gtt_id IS NOT NULL AND gtt_id <> ''")
+					rows = cur.fetchall()
+					# Resolve kite client once per loop (best-effort)
+					try:
+						kite_client = get_kite()
+					except Exception:
+						kite_client = None
+
+					for r in rows:
+						try:
+							gtt_raw = r['gtt_id']
+							gtt_key = str(gtt_raw)
+							symbol = r['symbol']
+							qty = int(r['qty'] or 1)
+							try:
+								stop = float(r['stop_loss']) if r['stop_loss'] is not None else None
+							except Exception:
+								stop = None
+
+							with _trail_lock_obj():
+								st = _trail_state.get(gtt_key)
+								if st is None:
+									# determine tick for symbol
+									try:
+										inst_csv = os.path.join(REPO_ROOT, os.getenv('INSTRUMENTS_CSV', os.path.join('Csvs','instruments.csv')))
+										ticks = _load_tick_sizes(inst_csv)
+										tick = ticks.get(symbol) or _fallback_tick_by_price(stop or 0)
+									except Exception:
+										tick = 0.05
+
+									# default sl_pct to 5% (strategy provides exact stop via db_stop update)
+									sl_pct = 0.05
+									try:
+										_start_trailing(kite_client, symbol, qty, float(sl_pct), ltp=(stop or 0), tick=tick, gtt_id=gtt_key, gtt_type=('single' if isinstance(gtt_raw, str) and 'OCO' not in gtt_raw else 'oco'), initial_trigger=stop)
+									except Exception:
+										# non-fatal — keep going
+										pass
+								else:
+									if stop:
+										st['db_stop'] = stop
+						except Exception:
+							error_logger.debug("Trailing DB sync row handling failed", exc_info=True)
+					conn.close()
+				except Exception:
+					error_logger.debug("Trailing DB sync failed", exc_info=True)
+				time.sleep(interval)
+
+		t = threading.Thread(target=_worker, name="gtt_trail_db_sync", daemon=True)
+		t.start()
+
+
+	# start DB sync thread so trailing worker sees persisted GTTs
 	try:
-		trade_id = f"ENTRY_{order_id}_{int(time.time())}"
-		timestamp = datetime.utcnow().isoformat()
-		
-		with pg_cursor() as (cur, conn):
-			# Create table if it doesn't exist
-			cur.execute("""
-				CREATE TABLE IF NOT EXISTS trade_journal (
-					id SERIAL PRIMARY KEY,
-					trade_id TEXT UNIQUE,
-					symbol TEXT NOT NULL,
-					entry_date TIMESTAMP,
-					entry_price NUMERIC,
-					entry_qty INTEGER,
-					exit_date TIMESTAMP,
-					exit_price NUMERIC,
-					pnl NUMERIC,
-					pnl_pct NUMERIC,
-					duration NUMERIC,
-					strategy TEXT,
-					status TEXT,
-					notes TEXT,
-					order_id TEXT,
-					gtt_id TEXT,
-					created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-					updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-				)
-			""")
-			
-			# Insert trade entry
-			cur.execute("""
-				INSERT INTO trade_journal (trade_id, symbol, entry_date, entry_price, entry_qty, status, order_id, gtt_id, notes)
-				VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-				ON CONFLICT (trade_id) DO UPDATE SET
-					updated_at = CURRENT_TIMESTAMP
-			""", (trade_id, symbol, timestamp, entry_price, qty, 'open', order_id, gtt_id, 'Auto-logged from app'))
-			
-			conn.commit()
-			order_logger.info("Trade journal entry created: trade_id=%s symbol=%s qty=%s price=%s", trade_id, symbol, qty, entry_price)
-	except Exception as e:
-		order_logger.error("Failed to log trade entry: %s", e)
-		raise
+		_sync_trailing_from_db()
+	except Exception:
+		error_logger.debug("Failed to start DB sync for trailing", exc_info=True)
 
 def _log_trade_exit(order_id, symbol, exit_price, exit_qty, exit_type='completed'):
 	"""Automatically log a trade exit when order is completed or GTT triggered."""
@@ -1805,7 +2016,63 @@ def _log_trade_exit(order_id, symbol, exit_price, exit_qty, exit_type='completed
 			
 			conn.commit()
 			order_logger.info("Trade exit logged: order_id=%s symbol=%s exit_price=%.2f pnl=%.2f pnl_pct=%.2f", 
-							 order_id, symbol, exit_price, pnl, pnl_pct)
+					 order_id, symbol, exit_price, pnl, pnl_pct)
+			# Attempt to cancel only the GTT that was attached to this trade (if any).
+			try:
+				# Read persisted gtt_id for this trade row (if present)
+				cur.execute("SELECT gtt_id FROM trade_journal WHERE id = %s", (entry_id,))
+				row = cur.fetchone()
+				gtt_to_cancel = None
+				if row:
+					# cursor may return tuple or dict-like row; handle both
+					try:
+						gtt_to_cancel = row.get('gtt_id') if hasattr(row, 'get') else row[0]
+					except Exception:
+						gtt_to_cancel = None
+				if gtt_to_cancel:
+					kite = get_kite()
+					normalized = None
+					try:
+						normalized = _extract_trigger_id(gtt_to_cancel)
+					except Exception:
+						normalized = gtt_to_cancel
+					# Attempt delete/cancel only for this specific trigger id
+					try:
+						if hasattr(kite, 'delete_gtt'):
+							kite.delete_gtt(normalized)
+						elif hasattr(kite, 'cancel_gtt'):
+							kite.cancel_gtt(normalized)
+						# Cleanup any cached references to this single gtt id
+						try:
+							with _broker_orders_lock:
+								for k, arr in list(_gtt_cache.items()):
+									newarr = [g for g in arr if str(g.get('id') or g.get('trigger_id')) != str(normalized)]
+									if newarr:
+										_gtt_cache[k] = newarr
+									else:
+										_gtt_cache.pop(k, None)
+						except Exception as e:
+							error_logger.debug("Silent exception ignored while cleaning _gtt_cache: %s", e)
+						# Remove from in-memory trail state only the entries that reference this trigger id
+						try:
+							with _trail_lock_obj():
+								for key in list(_trail_state.keys()):
+									st = _trail_state.get(key)
+									if st and str(_extract_trigger_id(st.get('gtt_id'))) == str(normalized):
+										_trail_state.pop(key, None)
+						except Exception as e:
+							error_logger.debug("Silent exception ignored while cleaning _trail_state: %s", e)
+						# Persist clearing the gtt_id in DB so sync won't re-register it
+						try:
+							cur.execute("UPDATE trade_journal SET gtt_id = NULL WHERE id = %s", (entry_id,))
+							conn.commit()
+						except Exception as e:
+							error_logger.debug("Failed to persist clear gtt_id for trade %s: %s", entry_id, e)
+						order_logger.info("Auto-cancelled GTT %s for symbol %s after exit", normalized, symbol)
+					except Exception as ce:
+						order_logger.warning("Failed to auto-cancel GTT %s: %s", gtt_to_cancel, ce)
+			except Exception as e:
+				error_logger.debug("Silent exception cancelling GTT on exit: %s", e)
 	except Exception as e:
 		order_logger.error("Failed to log trade exit: %s", e)
 		# Don't raise - exit logging should not block main flow

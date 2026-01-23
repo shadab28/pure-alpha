@@ -19,7 +19,7 @@ def record(symbol: str) -> None:
         _last_stop_ts[symbol] = datetime.now()
 
 
-def is_allowed(symbol: str, cooldown_seconds: int = 180) -> Tuple[bool, Optional[int]]:
+def is_allowed(symbol: str, cooldown_seconds: int = 600) -> Tuple[bool, Optional[int]]:
     """Return (allowed, remaining_seconds).
 
     allowed is True when no recent stop within cooldown_seconds. If False, remaining_seconds

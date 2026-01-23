@@ -1387,6 +1387,26 @@ class MomentumStrategy:
             # Use ranking price as fallback
             ltp = ranking.last_price
             self.broker.update_ltp(symbol, ltp)
+
+        # Extra cooldown rule: if there is a recently closed trade for this symbol,
+        # require current LTP to be at least 0.25% below the last exit price before re-entry.
+        # This applies to all new positions (P1, P2, P3).
+        try:
+            # Query strategy DB for the most recent closed trade for this symbol
+            recent = None
+            with self.db._get_conn() as conn:
+                cur = conn.cursor()
+                cur.execute("SELECT exit_price, exit_date FROM trades WHERE symbol = ? AND status = 'closed' ORDER BY exit_date DESC LIMIT 1", (symbol,))
+                recent = cur.fetchone()
+            if recent and recent[0] is not None:
+                last_exit_price = float(recent[0])
+                threshold_price = last_exit_price * (1.0 - 0.0025)  # 0.25% below exit
+                if ltp > threshold_price:
+                    logger.info(f"ENTRY_BLOCKED_PRICE_PROXIMITY {symbol}: ltp=₹{ltp:.2f} not <= threshold=₹{threshold_price:.2f} (last_exit=₹{last_exit_price:.2f})")
+                    return None
+        except Exception:
+            # Fail-open: if DB check fails, do not block entry
+            pass
         
         # Calculate quantity based on CAPITAL_PER_POSITION (₹5,000 per position)
         qty = self._calculate_qty(ltp, ranking.lot_size)

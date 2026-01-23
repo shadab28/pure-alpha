@@ -64,17 +64,10 @@ load_dotenv(os.path.join(REPO_ROOT, '.env'))
 # -------------------------------------------------------------------
 # Configure logging BEFORE importing any modules (especially app)
 # -------------------------------------------------------------------
-# Set up basic logging configuration
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-)
+from logging_config import setup_logging
 
-# Suppress verbose library logs
-logging.getLogger('urllib3').setLevel(logging.WARNING)
-logging.getLogger('kiteconnect').setLevel(logging.WARNING)
-logging.getLogger('werkzeug').setLevel(logging.WARNING)
+# Use centralized logging setup (configures console and quieter library loggers)
+setup_logging(logging.INFO)
 
 # Completely disable flask_limiter loggers by using NullHandler
 flask_limiter_logger = logging.getLogger('flask_limiter')
@@ -97,6 +90,51 @@ from pgAdmin_database.db_connection import pg_cursor, test_connection
 # Import Flask app and ltp_service (now that logging is set up)
 from app import app  # Flask app instance
 import ltp_service  # For populating caches with real-time data
+
+# Ensure the Flask `app` module sees the canonical implementations of
+# `fetch_ltp` and `get_kite` provided by ltp_service. This binds the
+# authoritative functions into the `app` namespace at startup so that
+# threaded workers and request handlers consistently reference the same
+# implementations (avoids intermittent NameError in different import contexts).
+try:
+    # Prefer package-relative import when available
+    try:
+        from Webapp.ltp_service import fetch_ltp as _canonical_fetch_ltp, get_kite as _canonical_get_kite
+    except Exception:
+        _canonical_fetch_ltp = getattr(ltp_service, 'fetch_ltp', None)
+        _canonical_get_kite = getattr(ltp_service, 'get_kite', None)
+
+    # Bind into the imported `app` module's globals so code in app.py that
+    # references `fetch_ltp` or `get_kite` at runtime finds them. `from app
+    # import app` gives us the Flask app object, but handlers look up names
+    # on the module object, so we must set them there (sys.modules['app']).
+    try:
+        import sys as _sys
+        app_mod = _sys.modules.get('app')
+        if app_mod is None:
+            # If the module isn't yet present under 'app', try package name
+            app_mod = _sys.modules.get('Webapp.app')
+
+        if _canonical_fetch_ltp:
+            # Set on the module object (module-level global)
+            if app_mod is not None:
+                setattr(app_mod, 'fetch_ltp', _canonical_fetch_ltp)
+            # Also make available in this main.py module's globals for safety
+            globals()['fetch_ltp'] = _canonical_fetch_ltp
+
+        if _canonical_get_kite:
+            if app_mod is not None:
+                setattr(app_mod, 'get_kite', _canonical_get_kite)
+            globals()['get_kite'] = _canonical_get_kite
+
+        if _canonical_fetch_ltp or _canonical_get_kite:
+            logging.info("Bound canonical fetch_ltp/get_kite into app module globals")
+        else:
+            logging.debug("No canonical fetch_ltp/get_kite found to bind")
+    except Exception as _bind_e:
+        logging.warning("Failed to bind into app module globals: %s", _bind_e)
+except Exception as e:
+    logging.warning("Failed to bind canonical ltp_service functions into app namespace: %s", e)
 
 # -------------------------------------------------------------------
 # Paths
