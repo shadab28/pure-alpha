@@ -1,0 +1,62 @@
+Strategy Summary — Pure Alpha Momentum Strategy
+
+1) Strategy Summary (High Level)
+- Strategy type: Momentum / Trend-following
+- Holding period: Intraday / Positional (designed for intraday entries with positional ladders; positions are closed or managed within the trading day but code supports short-lived positional holds)
+- Instruments: Equities (stocks) — primarily cash equities; code supports trading using the broker wrapper and OCO/GTTs. Futures/Options not explicitly enforced by code; instrument handling is symbol-driven.
+- Signal Timeframe: Scanning loop runs at SCAN_INTERVAL_SECONDS = 60s (ranking signals derived at strategy scan frequency). Typical signal timeframe used in scans: 1–15 minute style ranks (implementation uses minute-resolution ranking tables in practice).
+- Execution Timeframe: Execution attempts target immediate (market/limit) on the execution loop; worker cadence is 1-minute scan with 1-minute execution granularity.
+
+Key code/paths (for reference):
+- Main strategy module: Webapp/momentum_strategy.py
+- Trailing & GTT management: Webapp/app.py
+- LTP provider / kite binding: Webapp/ltp_service.py
+- Centralized logging: Webapp/logging_config.py
+- Cooldown helper: Webapp/cooldown.py
+- Databases: Webapp/momentum_strategy_paper.db (paper) and Webapp/momentum_strategy_live.db (live)
+
+2) Risk Controls (explicit values from the repo)
+- TOTAL_STRATEGY_CAPITAL: 	7,150,000? (NOTE: repo value: TOTAL_STRATEGY_CAPITAL = 150000 INR)
+- CAPITAL_PER_POSITION: 	7,3000 (CAPITAL_PER_POSITION = 3000 INR per position)
+- Max positions: MAX_POSITIONS = 50
+- Max capital usage: code does not automatically limit to a percentage of external margin; by configuration the strategy total capital is 150,000 INR and max simultaneous positions is 50. Users should enforce a deployed-capital limit externally (e.g., keep deployed capital <= 30-40% of available margin).
+- Max risk per trade: Position 1 stop: POSITION_1_STOP_LOSS_PCT = -2.5% (fixed); Position 2 stop: -2.5% (floating); Position 3 stop: -5% (floating)
+- Max trades per day: not explicitly limited in code — controlled by MAX_POSITIONS and scanning rules.
+- Single-symbol exposure limit: not explicitly enforced beyond a per-symbol position check and MAX_POSITIONS global cap.
+- Daily loss limit (kill-switch): not present as an automated global kill-switch in code; recommended to configure an external monitor to call the EXIT webhook when daily drawdown (e.g., 2% of deployed capital) is reached.
+- Auto square-off time / Overnight carry: No explicit auto square-off timer is enforced in code; the strategy is designed for intraday use and should be configured to avoid overnight carries.
+
+3) Execution Method
+- Execution via: Webhook/API or paper broker wrapper present in code; production execution uses the Kite-like wrapper in Webapp/ltp_service.py
+- Order types used: ENTRY orders (market/limit), EXIT orders, AMEND_EXIT_SL (GTT modify to implement trailing). The app places GTTs (triggered stop orders) and uses client-side trailing by modifying GTT triggers.
+- One order per request: code places one GTT per call for an SL/target flow; OCO behavior for position 1 is implemented via GTT or equivalent simulated orders.
+- Unique remarks: implemented in order placement so each position records broker ids and a unique trade id; trades are persisted in SQLite DB for reconciliation.
+- Rate limiting: The code includes conservative update logic and falls back to delete+place when modify fails; however it does not implement a strict global rate limiter — operator should rate-limit GTT modifications to avoid broker rejections.
+
+4) Fallback & Safety
+- If API fails / network drops: Code currently logs errors and falls back to delete+place when modify_gtt fails. Many calls are wrapped in try/except and will log to date-foldered logs under ./logs/YYYY-MM-DD/. If network issues persist, manual or UI-driven EXITs should be used.
+- If strategy crashes: The strategy persists state (open/closed trades) to SQLite DBs under the Webapp/ directory so restart can resume with persisted trade records; trailing worker and ticker should rehydrate state on restart.
+- Explicit operator control: "All open positions can be force-exited via EXIT webhook or UI." (the code exposes APIs to close trades and will cancel the persisted GTT for the trade on exit.)
+
+Operational Notes & Known Limitations
+- TRAIL_THRESHOLD: default 0.001 (0.1%) configurable via environment var TRAIL_THRESHOLD or WEBAPP_TRAIL_THRESHOLD.
+- GTT persistence: trade rows persist a gtt_id per trade; on exit the code cancels only the persisted gtt_id for that trade (reduces accidental cancel of unrelated GTTs).
+- Post-modify verification: recommended but not yet implemented — currently the code trusts broker responses and persists returned ids; adding a verification fetch after modify_gtt is recommended.
+- Broker connectivity: code logs DNS/network errors (api.kite.trade) during live runs; ensure reliable network/DNS, and consider retry/backoff wrappers for resilient behavior.
+
+Files created/edited in this project session:
+- Webapp/logging_config.py (central logging helper)
+- Webapp/modify_test_harness.py (mock harness)
+- Webapp/trail_harness.py (simulation harness)
+- Webapp/momentum_strategy.py (strategy changes: proximity rule, logging)
+- Webapp/app.py (trailing worker improvements, gtt normalization, exit cancel scoping)
+- STRATEGY_SUMMARY.md (detailed markdown summary)
+- STRATEGY_SUMMARY.txt (this file)
+
+Next recommendations
+- Add a global daily loss kill-switch (2% of deployed capital) enforced in `momentum_strategy.py` with automated EXIT webhook calls.
+- Implement post-modify verification (GET trigger) to confirm broker accepted modify_gtt and reconcile local state.
+- Add exponential backoff + persistent retry counters for modify/delete/place GTT flows.
+- Add a rate-limiter for GTT modifications to avoid broker-side throttling.
+
+End of summary.

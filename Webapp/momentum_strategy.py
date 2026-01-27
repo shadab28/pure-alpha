@@ -91,7 +91,14 @@ def setup_logging():
     
     # Main logger
     logger = logging.getLogger("momentum_strategy")
-    logger.setLevel(logging.DEBUG)
+    # Default to WARNING to reduce noisy startup/info messages; can be
+    # overridden by setting environment variable MOMENTUM_LOG_LEVEL to
+    # DEBUG/INFO/WARNING/ERROR as needed for troubleshooting.
+    try:
+        lvl_name = os.getenv('MOMENTUM_LOG_LEVEL', 'WARNING').upper()
+        logger.setLevel(getattr(logging, lvl_name, logging.WARNING))
+    except Exception:
+        logger.setLevel(logging.WARNING)
     
     # Custom formatter with colors for console
     class ColoredFormatter(logging.Formatter):
@@ -102,9 +109,12 @@ def setup_logging():
                 msg = f"{Colors.GREEN}{msg}{Colors.RESET}"
             return msg
     
-    # Console handler (INFO level)
+    # Console handler (respect configured logger level but default to WARNING)
     console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.INFO)
+    try:
+        console_handler.setLevel(getattr(logging, os.getenv('MOMENTUM_LOG_LEVEL', 'WARNING').upper(), logging.WARNING))
+    except Exception:
+        console_handler.setLevel(logging.WARNING)
     console_format = ColoredFormatter(
         '%(asctime)s [MOMENTUM] %(levelname)s: %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S'

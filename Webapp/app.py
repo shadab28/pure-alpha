@@ -247,15 +247,15 @@ def _log_request(response):
 		latency = None
 		if start:
 			latency = round((time.time() - start) * 1000)  # ms
-		access_logger.info(
-			"%s %s %s %s %sms %s",
-			request.remote_addr or '-',
-			request.method,
-			request.path,
-			response.status_code,
-			latency if latency is not None else '-',
-			request.user_agent.string if hasattr(request, 'user_agent') else '-' 
-		)
+		# Skip verbose access logging for the frequent strategy status endpoint
+		if request.path == '/api/strategy/momentum/status':
+			# Only log if slow or error
+			if (latency is not None and latency > 500) or (response.status_code >= 400):
+				access_logger.info("%s %s %s %s %sms %s", request.remote_addr or '-', request.method, request.path, response.status_code, latency if latency is not None else '-', request.user_agent.string if hasattr(request, 'user_agent') else '-')
+		else:
+			# General logging: only log slow requests (>500ms) or non-200 responses
+			if (latency is not None and latency > 500) or (response.status_code >= 400):
+				access_logger.info("%s %s %s %s %sms %s", request.remote_addr or '-', request.method, request.path, response.status_code, latency if latency is not None else '-', request.user_agent.string if hasattr(request, 'user_agent') else '-')
 	except Exception as e:
 		# Don't crash the request on logging errors
 		error_logger.exception("Failed to log access: %s", e)
@@ -1431,6 +1431,25 @@ def _round_to_tick(price: float, tick: float) -> float:
 		tick = 0.05
 	return round(round(price / tick) * tick, 2)
 
+
+def _ceil_to_tick(price: float, tick: float) -> float:
+	"""Round price up to the nearest tick and return a 2-decimal float.
+
+	This is used for stop triggers where we want the trigger to be strictly
+	above any previous value (avoid placing a trigger that the exchange will
+	snap down to the previous tick and immediately fire).
+	"""
+	try:	
+		import math
+		if not tick or tick <= 0:
+			tick = 0.05
+		return round(math.ceil(float(price) / float(tick)) * float(tick), 2)
+	except Exception:
+		try:
+			return float(round(price, 2))
+		except Exception:
+			return float(price)
+
 def _fallback_tick_by_price(ltp: float) -> float:
 	"""Derive tick size when instrument CSV lacks data.
 
@@ -1490,8 +1509,13 @@ def _place_bracket_oco_gtt(kite, symbol: str, qty: int, ref_price: float, target
 	inst_csv = os.path.join(REPO_ROOT, os.getenv('INSTRUMENTS_CSV', os.path.join('Csvs','instruments.csv')))
 	ticks = _load_tick_sizes(inst_csv)
 	tick = ticks.get(symbol) or _fallback_tick_by_price(ref_price)
-	target_px = _round_to_tick(ref_price * (1 + target_pct), tick)
-	stop_px = _round_to_tick(ref_price * (1 - sl_pct), tick)
+	# Use ceil rounding for trigger values so they are never below the exact
+	# computed level. This avoids cases where a computed trigger like 62.35125
+	# would be rounded down to 62.35 (invalid for tick 0.01) and immediately
+	# trigger at current LTP. Order execution prices may still be rounded to
+	# the nearest tick using _round_to_tick where appropriate.
+	target_px = _ceil_to_tick(ref_price * (1 + target_pct), tick)
+	stop_px = _ceil_to_tick(ref_price * (1 - sl_pct), tick)
 	if target_px <= 0 or stop_px <= 0:
 		raise ValueError('Computed GTT prices invalid')
 	resp = kite.place_gtt(
@@ -1506,14 +1530,16 @@ def _place_bracket_oco_gtt(kite, symbol: str, qty: int, ref_price: float, target
 				"quantity": qty,
 				"product": kite.PRODUCT_CNC,
 				"order_type": kite.ORDER_TYPE_LIMIT,
-				"price": stop_px,
+				# Limit prices should be exact multiples of tick as well; use
+				# _round_to_tick to normalize them (ceil used above for triggers).
+				"price": _round_to_tick(stop_px, tick),
 			},
 			{
 				"transaction_type": kite.TRANSACTION_TYPE_SELL,
 				"quantity": qty,
 				"product": kite.PRODUCT_CNC,
 				"order_type": kite.ORDER_TYPE_LIMIT,
-				"price": target_px,
+				"price": _round_to_tick(target_px, tick),
 			},
 		]
 	)
@@ -1592,9 +1618,10 @@ def _start_trailing(kite, symbol: str, qty: int, sl_pct: float, ltp: float = Non
 	trig = None
 	try:
 		if initial_trigger is not None:
-			trig = float(initial_trigger)
+			# prefer ceil-to-tick so initial trigger is strictly at/above the supplied value
+			trig = _ceil_to_tick(float(initial_trigger), tick)
 		elif ltp is not None:
-			trig = _round_to_tick(float(ltp) * (1 - TRAIL_THRESHOLD), tick)
+			trig = _ceil_to_tick(float(ltp) * (1 - TRAIL_THRESHOLD), tick)
 	except Exception:
 		trig = None
 
@@ -1755,8 +1782,10 @@ def _ensure_trailer_thread(kite):
 					current_trigger = st.get('trigger')
 
 					if current_trigger is None or current_trigger <= 0:
-						# No trigger set yet, initialize it from LTP-based threshold
-						new_trig = _round_to_tick(ltp * (1 - TRAIL_THRESHOLD), st['tick'])
+						# No trigger set yet, initialize it from LTP-based threshold.
+						# Use ceil rounding so initial trigger is never rounded down by exchange
+						# and accidentally equal to current LTP.
+						new_trig = _ceil_to_tick(ltp * (1 - TRAIL_THRESHOLD), st['tick'])
 						st['trigger'] = new_trig
 						continue
 
@@ -1771,7 +1800,8 @@ def _ensure_trailer_thread(kite):
 					candidate_new_trig = None
 					if db_stop and db_stop > current_trigger:
 						# honor strategy's stop (rounded to tick)
-						candidate_new_trig = _round_to_tick(db_stop, st['tick'])
+						# Use ceil to ensure trigger is not rounded down by tick snapping at broker
+						candidate_new_trig = _ceil_to_tick(db_stop, st['tick'])
 						trail_logger.debug("TRAIL_DB_USE symbol=%s gtt_id=%s db_stop=%.2f current_stop=%.2f", sym, gtt_id, db_stop, current_trigger or 0.0)
 					else:
 						# Fallback: compute based on LTP and configured threshold
@@ -1783,7 +1813,9 @@ def _ensure_trailer_thread(kite):
 							trail_logger.debug("TRAIL_SKIP symbol=%s gtt_id=%s ltp=%.2f current_stop=%.2f gap=%.3f threshold=%.3f", 
 												sym, gtt_id, ltp, current_trigger or 0.0, current_gap_pct, TRAIL_THRESHOLD)
 							continue
-						candidate_new_trig = _round_to_tick(ltp * (1 - TRAIL_THRESHOLD), st['tick'])
+						# Raise using ceil rounding to ensure broker tick snapping doesn't
+					# reduce the trigger below the intended level.
+						candidate_new_trig = _ceil_to_tick(ltp * (1 - TRAIL_THRESHOLD), st['tick'])
 
 					# Safety: never lower the stop, only raise it
 					if not candidate_new_trig or candidate_new_trig <= current_trigger:
@@ -1816,7 +1848,7 @@ def _ensure_trailer_thread(kite):
 									trigger_type=kite.GTT_TYPE_OCO,
 									tradingsymbol=sym,
 									exchange='NSE',
-									trigger_values=[new_trig, new_target],
+										trigger_values=[new_trig, new_target],
 									last_price=ltp,
 									orders=[
 										{
@@ -1824,19 +1856,44 @@ def _ensure_trailer_thread(kite):
 											"quantity": st['qty'],
 											"product": kite.PRODUCT_CNC,
 											"order_type": kite.ORDER_TYPE_LIMIT,
-											"price": new_trig,
+												"price": _round_to_tick(new_trig, st['tick']),
 										},
 										{
 											"transaction_type": kite.TRANSACTION_TYPE_SELL,
 											"quantity": st['qty'],
 											"product": kite.PRODUCT_CNC,
 											"order_type": kite.ORDER_TYPE_LIMIT,
-											"price": new_target,
+												"price": _round_to_tick(new_target, st['tick']),
 										},
 									]
 								)
 								trail_logger.info("TRAIL_MODIFY_OCO symbol=%s gtt_id=%s stop=%.2f target=%.2f (fixed)", sym, st.get('gtt_id'), new_trig, new_target)
 								trail_logger.debug("TRAIL_MODIFY_RESP symbol=%s gtt_id=%s resp=%s", sym, st.get('gtt_id'), str(resp))
+								# Post-modify verification: ensure broker shows the new trigger value.
+								try:
+									found = False
+									gtts_now = _fetch_gtts_with_timeout(kite, timeout=2.0) or []
+									for gg in gtts_now:
+										gid = _extract_trigger_id(gg.get('id') or gg.get('trigger_id') or gg)
+										if str(gid) == str(normalized_id):
+											tv = gg.get('condition', {}).get('trigger_values') or gg.get('trigger_values') or []
+											if any(abs(float(x) - float(new_trig)) < 1e-6 for x in tv):
+												found = True
+											break
+									if not found:
+										# verification failed: replace the GTT to ensure correct trigger
+										if normalized_id and hasattr(kite, 'delete_gtt'):
+											try:
+												kite.delete_gtt(normalized_id)
+											except Exception:
+												pass
+										new_id = _place_sl_gtt(kite, sym, st['qty'], ref_price=ltp, sl_pct=st['sl_pct'])
+										with _trail_lock_obj():
+											st['gtt_id'] = new_id
+											st['trigger'] = new_trig
+								except Exception:
+									# ignore verification errors - we've already updated local state
+									pass
 							else:
 								# Single-leg GTT
 								resp = kite.modify_gtt(
@@ -1851,11 +1908,34 @@ def _ensure_trailer_thread(kite):
 										"quantity": st['qty'],
 										"product": kite.PRODUCT_CNC,
 										"order_type": kite.ORDER_TYPE_LIMIT,
-										"price": new_trig,
+										"price": _round_to_tick(new_trig, st['tick']),
 									}]
 								)
 								trail_logger.info("TRAIL_MODIFY symbol=%s gtt_id=%s trigger=%.2f", sym, st.get('gtt_id'), new_trig)
 								trail_logger.debug("TRAIL_MODIFY_RESP symbol=%s gtt_id=%s resp=%s", sym, st.get('gtt_id'), str(resp))
+								# Post-modify verification for single-leg as well
+								try:
+									found = False
+									gtts_now = _fetch_gtts_with_timeout(kite, timeout=2.0) or []
+									for gg in gtts_now:
+										gid = _extract_trigger_id(gg.get('id') or gg.get('trigger_id') or gg)
+										if str(gid) == str(normalized_id):
+											tv = gg.get('condition', {}).get('trigger_values') or gg.get('trigger_values') or []
+											if any(abs(float(x) - float(new_trig)) < 1e-6 for x in tv):
+												found = True
+											break
+									if not found:
+										if normalized_id and hasattr(kite, 'delete_gtt'):
+											try:
+												kite.delete_gtt(normalized_id)
+											except Exception:
+												pass
+										new_id = _place_sl_gtt(kite, sym, st['qty'], ref_price=ltp, sl_pct=st['sl_pct'])
+										with _trail_lock_obj():
+											st['gtt_id'] = new_id
+											st['trigger'] = new_trig
+								except Exception:
+									pass
 							# Update local state from response when possible
 							try:
 								new_id = _extract_trigger_id(resp.get('trigger_id') or resp.get('id') if isinstance(resp, dict) else resp)
