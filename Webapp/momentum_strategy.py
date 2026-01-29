@@ -36,9 +36,9 @@ import json
 # CONFIGURATION
 # ============================================================================
 
-TOTAL_STRATEGY_CAPITAL = Decimal("150000")  # INR total capital
+TOTAL_STRATEGY_CAPITAL = Decimal("240000")  # INR total capital
 CAPITAL_PER_POSITION = Decimal("3000")  # INR per position (₹3,000 each trade)
-MAX_POSITIONS = 50  # Max 50 positions
+MAX_POSITIONS = 90  # Max 50 positions
 SCAN_INTERVAL_SECONDS = 60  # Check list every 1 minute
 
 # Entry Filters
@@ -91,14 +91,7 @@ def setup_logging():
     
     # Main logger
     logger = logging.getLogger("momentum_strategy")
-    # Default to WARNING to reduce noisy startup/info messages; can be
-    # overridden by setting environment variable MOMENTUM_LOG_LEVEL to
-    # DEBUG/INFO/WARNING/ERROR as needed for troubleshooting.
-    try:
-        lvl_name = os.getenv('MOMENTUM_LOG_LEVEL', 'WARNING').upper()
-        logger.setLevel(getattr(logging, lvl_name, logging.WARNING))
-    except Exception:
-        logger.setLevel(logging.WARNING)
+    logger.setLevel(logging.DEBUG)
     
     # Custom formatter with colors for console
     class ColoredFormatter(logging.Formatter):
@@ -109,12 +102,9 @@ def setup_logging():
                 msg = f"{Colors.GREEN}{msg}{Colors.RESET}"
             return msg
     
-    # Console handler (respect configured logger level but default to WARNING)
+    # Console handler (INFO level)
     console_handler = logging.StreamHandler()
-    try:
-        console_handler.setLevel(getattr(logging, os.getenv('MOMENTUM_LOG_LEVEL', 'WARNING').upper(), logging.WARNING))
-    except Exception:
-        console_handler.setLevel(logging.WARNING)
+    console_handler.setLevel(logging.INFO)
     console_format = ColoredFormatter(
         '%(asctime)s [MOMENTUM] %(levelname)s: %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S'
@@ -168,6 +158,8 @@ class Trade:
     exit_price: Optional[Decimal] = None
     pnl: Optional[Decimal] = None
     highest_price_since_entry: Optional[Decimal] = None  # For trailing stops
+    # Broker/order identifiers (optional)
+    gtt_id: Optional[str] = None
     execution_mode: str = "PAPER"  # PAPER or LIVE
     order_book_rank_score: Optional[float] = None  # Order book quality score at entry
     rank_gm_at_entry: Optional[float] = None  # Rank GM at time of entry
@@ -884,7 +876,8 @@ class StrategyDB:
                         exit_time=datetime.fromisoformat(row['exit_time']) if row['exit_time'] else None,
                         exit_price=Decimal(row['exit_price']) if row['exit_price'] else None,
                         pnl=Decimal(row['pnl']) if row['pnl'] else None,
-                        highest_price_since_entry=Decimal(row['highest_price_since_entry']) if row['highest_price_since_entry'] else None
+                        highest_price_since_entry=Decimal(row['highest_price_since_entry']) if row['highest_price_since_entry'] else None,
+                        gtt_id=str(row['gtt_id']) if row['gtt_id'] is not None else None
                     ))
                 return trades
             finally:
@@ -1655,28 +1648,42 @@ class MomentumStrategy:
                 return
             
             kite = self.broker._get_kite()
-            
-            # Place OCO (two-leg) GTT order
+            # Normalize trigger and order prices to instrument tick size to avoid exchange rejections
+            try:
+                from Webapp.app import _load_tick_sizes, _ceil_to_tick, _round_to_tick
+                repo_root = os.path.dirname(os.path.dirname(__file__))
+                inst_csv = os.path.join(repo_root, os.getenv('INSTRUMENTS_CSV', os.path.join('Csvs','instruments.csv')))
+                ticks = _load_tick_sizes(inst_csv)
+                tick = ticks.get(symbol) or 0.05
+            except Exception:
+                # Fallback tick
+                tick = 0.05
+            trigger_stop = _ceil_to_tick(stop_price, tick) if ' _ceil_to_tick' not in globals() else _ceil_to_tick(stop_price, tick)
+            trigger_target = _ceil_to_tick(target_price, tick) if ' _ceil_to_tick' not in globals() else _ceil_to_tick(target_price, tick)
+            order_stop = _round_to_tick(trigger_stop, tick) if ' _round_to_tick' not in globals() else _round_to_tick(trigger_stop, tick)
+            order_target = _round_to_tick(trigger_target, tick) if ' _round_to_tick' not in globals() else _round_to_tick(trigger_target, tick)
+
+            # Place OCO (two-leg) GTT order with normalized tick prices
             gtt_id = kite.place_gtt(
                 trigger_type=kite.GTT_TYPE_OCO,  # OCO = two legs
                 tradingsymbol=symbol,
                 exchange=kite.EXCHANGE_NSE,
-                trigger_values=[stop_price, target_price],  # Two trigger prices
-                last_price=float(self.broker.get_ltp(symbol) or stop_price),
+                trigger_values=[trigger_stop, trigger_target],  # Two trigger prices (ceil'd)
+                last_price=float(self.broker.get_ltp(symbol) or trigger_stop),
                 orders=[
                     {  # Leg 1: Stop-Loss order
                         "transaction_type": kite.TRANSACTION_TYPE_SELL,
                         "quantity": qty,
                         "product": kite.PRODUCT_CNC,
                         "order_type": kite.ORDER_TYPE_LIMIT,
-                        "price": stop_price
+                        "price": order_stop
                     },
                     {  # Leg 2: Target order
                         "transaction_type": kite.TRANSACTION_TYPE_SELL,
                         "quantity": qty,
                         "product": kite.PRODUCT_CNC,
                         "order_type": kite.ORDER_TYPE_LIMIT,
-                        "price": target_price
+                        "price": order_target
                     }
                 ]
             )
@@ -1739,21 +1746,32 @@ class MomentumStrategy:
                 return
             
             kite = self.broker._get_kite()
-            
-            # Place single-leg GTT order (SL only, no target)
+            # Normalize stop and order prices to instrument tick
+            try:
+                from Webapp.app import _load_tick_sizes, _ceil_to_tick, _round_to_tick
+                repo_root = os.path.dirname(os.path.dirname(__file__))
+                inst_csv = os.path.join(repo_root, os.getenv('INSTRUMENTS_CSV', os.path.join('Csvs','instruments.csv')))
+                ticks = _load_tick_sizes(inst_csv)
+                tick = ticks.get(symbol) or 0.05
+            except Exception:
+                tick = 0.05
+            trigger_stop = _ceil_to_tick(stop_price, tick) if ' _ceil_to_tick' not in globals() else _ceil_to_tick(stop_price, tick)
+            order_stop = _round_to_tick(trigger_stop, tick) if ' _round_to_tick' not in globals() else _round_to_tick(trigger_stop, tick)
+
+            # Place single-leg GTT order (SL only, no target) with normalized prices
             gtt_id = kite.place_gtt(
                 trigger_type=kite.GTT_TYPE_SINGLE,
                 tradingsymbol=symbol,
                 exchange=kite.EXCHANGE_NSE,
-                trigger_values=[stop_price],
-                last_price=float(self.broker.get_ltp(symbol) or stop_price),
+                trigger_values=[trigger_stop],
+                last_price=float(self.broker.get_ltp(symbol) or trigger_stop),
                 orders=[
                     {  # Single leg: Stop-Loss order
                         "transaction_type": kite.TRANSACTION_TYPE_SELL,
                         "quantity": qty,
                         "product": kite.PRODUCT_CNC,
                         "order_type": kite.ORDER_TYPE_LIMIT,
-                        "price": stop_price
+                        "price": order_stop
                     }
                 ]
             )

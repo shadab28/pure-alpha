@@ -247,15 +247,15 @@ def _log_request(response):
 		latency = None
 		if start:
 			latency = round((time.time() - start) * 1000)  # ms
-		# Skip verbose access logging for the frequent strategy status endpoint
-		if request.path == '/api/strategy/momentum/status':
-			# Only log if slow or error
-			if (latency is not None and latency > 500) or (response.status_code >= 400):
-				access_logger.info("%s %s %s %s %sms %s", request.remote_addr or '-', request.method, request.path, response.status_code, latency if latency is not None else '-', request.user_agent.string if hasattr(request, 'user_agent') else '-')
-		else:
-			# General logging: only log slow requests (>500ms) or non-200 responses
-			if (latency is not None and latency > 500) or (response.status_code >= 400):
-				access_logger.info("%s %s %s %s %sms %s", request.remote_addr or '-', request.method, request.path, response.status_code, latency if latency is not None else '-', request.user_agent.string if hasattr(request, 'user_agent') else '-')
+		access_logger.info(
+			"%s %s %s %s %sms %s",
+			request.remote_addr or '-',
+			request.method,
+			request.path,
+			response.status_code,
+			latency if latency is not None else '-',
+			request.user_agent.string if hasattr(request, 'user_agent') else '-' 
+		)
 	except Exception as e:
 		# Don't crash the request on logging errors
 		error_logger.exception("Failed to log access: %s", e)
