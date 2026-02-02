@@ -38,11 +38,11 @@ import json
 
 TOTAL_STRATEGY_CAPITAL = Decimal("240000")  # INR total capital
 CAPITAL_PER_POSITION = Decimal("3000")  # INR per position (₹3,000 each trade)
-MAX_POSITIONS = 90  # Max 50 positions
+MAX_POSITIONS = 90  # Max 90 positions
 SCAN_INTERVAL_SECONDS = 60  # Check list every 1 minute
 
 # Entry Filters
-MIN_RANK_GM_THRESHOLD = 1.5  # HARD filter: Only trade when Rank_GM > 2.5
+MIN_RANK_GM_THRESHOLD = 2.5  # HARD filter: Only trade when Rank_GM > 2.5
 
 # Position-specific rules
 POSITION_1_STOP_LOSS_PCT = Decimal("-2.5")    # Fixed -2.5% from entry (50% reduction)

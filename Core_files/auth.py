@@ -160,6 +160,7 @@ def main(argv=None):
             raise SystemExit(f"Failed to generate session with provided request token: {e}")
     else:
         if args.no_interactive:
+            
             raise SystemExit("No request token provided and interactive mode disabled.")
         access_token = obtain_access_token_interactive(api_key, api_secret)
 
