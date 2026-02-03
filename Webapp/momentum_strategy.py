@@ -92,6 +92,7 @@ def setup_logging():
     # Main logger
     logger = logging.getLogger("momentum_strategy")
     logger.setLevel(logging.DEBUG)
+    logger.propagate = False  # Prevent propagation to root logger to avoid duplicates
     
     # Custom formatter with colors for console
     class ColoredFormatter(logging.Formatter):
