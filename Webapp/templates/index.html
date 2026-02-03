@@ -63,6 +63,7 @@
   <button id="tab-filtered" class="btn secondary">Filtered</button>
     <button id="tab-ck" class="btn secondary">CK</button>
   <button id="tab-vcp" class="btn secondary">VCP</button>
+  <button id="tab-ema-history" class="btn secondary">EMA History (15m)</button>
   <button id="tab-orders" class="btn secondary">Orders</button>
   <button id="tab-active" class="btn secondary">Active Orderbook</button>
   <button id="tab-trades" class="btn secondary">Trade Journal</button>
@@ -457,6 +458,33 @@
               <th data-key="type">Type</th>
               <th data-key="status">Status</th>
               <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- EMA History (15m) view -->
+    <div id="view-ema-history" class="card" style="display:none; margin-top:14px;">
+      <div class="card-header" style="display:flex;align-items:center;justify-content:space-between;">
+        <span>EMA History (15-Minute Candles)</span>
+        <div style="display:flex; gap:10px; align-items:center;">
+          <input id="ema-filter-symbol" type="text" placeholder="Filter by symbol..." style="padding:6px; width:150px;" />
+          <button class="btn secondary" id="btn-refresh-ema-history">Refresh</button>
+        </div>
+      </div>
+      <div class="card-body">
+        <table id="ema-history-table">
+          <thead>
+            <tr>
+              <th data-key="timestamp">Timestamp</th>
+              <th data-key="symbol">Symbol</th>
+              <th data-key="ema_20">EMA 20</th>
+              <th data-key="ema_50">EMA 50</th>
+              <th data-key="ema_100">EMA 100</th>
+              <th data-key="ema_200">EMA 200</th>
+              <th data-key="ltp">Last Traded Price</th>
             </tr>
           </thead>
           <tbody></tbody>
@@ -907,16 +935,17 @@
       const tabActive = document.getElementById('tab-active');
       const tabCK = document.getElementById('tab-ck');
       const tabVCP = document.getElementById('tab-vcp');
+      const tabEmaHistory = document.getElementById('tab-ema-history');
       const tabTrades = document.getElementById('tab-trades');
 
       // Generic helper: show one view and highlight its tab with .active
       function setSelectedTab(tabEl, viewId){
         // hide all views
-        ['view-main','view-filtered','view-orders','view-active','view-ck','view-vcp','view-trades'].forEach(id=>{
+        ['view-main','view-filtered','view-orders','view-active','view-ck','view-vcp','view-ema-history','view-trades'].forEach(id=>{
           const v = document.getElementById(id); if (v) v.style.display = 'none';
         });
         // normalize classes: set all tabs to exactly 'btn secondary' (remove active)
-        [tabMain, tabFiltered, tabOrders, tabActive, tabCK, tabVCP, tabTrades].forEach(t=>{
+        [tabMain, tabFiltered, tabOrders, tabActive, tabCK, tabVCP, tabEmaHistory, tabTrades].forEach(t=>{
           if (!t) return;
           t.classList.remove('active');
           t.classList.remove('secondary');
@@ -938,6 +967,7 @@
       if (tabActive) tabActive.addEventListener('click', ()=> { setSelectedTab(tabActive, 'view-active'); fetchActiveOrderbook(); });
   if (tabCK) tabCK.addEventListener('click', ()=> { setSelectedTab(tabCK, 'view-ck'); fetchCK(); });
   if (tabVCP) tabVCP.addEventListener('click', ()=> { setSelectedTab(tabVCP, 'view-vcp'); fetchVCP(); });
+  if (tabEmaHistory) tabEmaHistory.addEventListener('click', ()=> { setSelectedTab(tabEmaHistory, 'view-ema-history'); fetchEmaHistory(); });
   if (tabTrades) tabTrades.addEventListener('click', ()=> { setSelectedTab(tabTrades, 'view-trades'); fetchTrades(); });
 
   // Default to All (main) tab on load
@@ -1261,6 +1291,118 @@
 
   // Attach sorting to VCP table
   attachSortingFor('vcp-table', sortStateVCP, renderVCPTable);
+
+  // ========== EMA HISTORY (15-MINUTE) LOGIC ==========
+  let latestEmaHistoryRows = [];
+  let sortStateEmaHistory = { key: 'timestamp', dir: 'desc' };
+  let emaHistoryInterval = null;
+  let emaHistoryFilterSymbol = '';
+
+  function renderEmaHistoryTable() {
+    applySort(latestEmaHistoryRows, sortStateEmaHistory);
+    const tbody = document.querySelector('#ema-history-table tbody');
+    if (!tbody) return;
+    tbody.innerHTML = '';
+    
+    // Apply symbol filter if set
+    const filterSymbol = document.getElementById('ema-filter-symbol')?.value?.trim().toUpperCase() || '';
+    let filtered = latestEmaHistoryRows;
+    if (filterSymbol) {
+      filtered = latestEmaHistoryRows.filter(r => r.symbol && r.symbol.toUpperCase().includes(filterSymbol));
+    }
+    
+    if (filtered.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="7" class="muted">No EMA history data available</td></tr>';
+      return;
+    }
+    
+    for (const r of filtered) {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${r.timestamp || ''}</td>
+        <td><strong>${r.symbol || ''}</strong></td>
+        <td>${r.ema_20 != null ? Number(r.ema_20).toFixed(2) : '<span class="muted">-</span>'}</td>
+        <td>${r.ema_50 != null ? Number(r.ema_50).toFixed(2) : '<span class="muted">-</span>'}</td>
+        <td>${r.ema_100 != null ? Number(r.ema_100).toFixed(2) : '<span class="muted">-</span>'}</td>
+        <td>${r.ema_200 != null ? Number(r.ema_200).toFixed(2) : '<span class="muted">-</span>'}</td>
+        <td class="num"><strong>${r.ltp != null ? Number(r.ltp).toFixed(2) : '<span class="muted">-</span>'}</strong></td>
+      `;
+      tbody.appendChild(tr);
+    }
+  }
+
+  async function fetchEmaHistory() {
+    try {
+      const res = await fetch('/api/ema-history');
+      const j = await res.json();
+      if (!res.ok) throw new Error(j.error || 'Failed to fetch EMA history');
+      
+      const data = j.data || {};
+      const rows = [];
+      
+      // Transform data into rows format
+      // Expected format: { symbol: { candles: [...] } } or flat list
+      if (Array.isArray(data)) {
+        // If it's an array of candle records
+        for (const candle of data) {
+          rows.push({
+            timestamp: candle.timestamp || '',
+            symbol: candle.symbol || '',
+            ema_20: (typeof candle.ema_20 === 'number') ? candle.ema_20 : (candle.ema_20 ? Number(candle.ema_20) : null),
+            ema_50: (typeof candle.ema_50 === 'number') ? candle.ema_50 : (candle.ema_50 ? Number(candle.ema_50) : null),
+            ema_100: (typeof candle.ema_100 === 'number') ? candle.ema_100 : (candle.ema_100 ? Number(candle.ema_100) : null),
+            ema_200: (typeof candle.ema_200 === 'number') ? candle.ema_200 : (candle.ema_200 ? Number(candle.ema_200) : null),
+            ltp: (typeof candle.ltp === 'number') ? candle.ltp : (candle.ltp ? Number(candle.ltp) : null)
+          });
+        }
+      } else {
+        // If it's an object with symbols as keys
+        for (const symbol of Object.keys(data).sort()) {
+          const symbolData = data[symbol];
+          if (symbolData && Array.isArray(symbolData.candles)) {
+            for (const candle of symbolData.candles) {
+              rows.push({
+                timestamp: candle.timestamp || '',
+                symbol: symbol,
+                ema_20: (typeof candle.ema_20 === 'number') ? candle.ema_20 : (candle.ema_20 ? Number(candle.ema_20) : null),
+                ema_50: (typeof candle.ema_50 === 'number') ? candle.ema_50 : (candle.ema_50 ? Number(candle.ema_50) : null),
+                ema_100: (typeof candle.ema_100 === 'number') ? candle.ema_100 : (candle.ema_100 ? Number(candle.ema_100) : null),
+                ema_200: (typeof candle.ema_200 === 'number') ? candle.ema_200 : (candle.ema_200 ? Number(candle.ema_200) : null),
+                ltp: (typeof candle.ltp === 'number') ? candle.ltp : (candle.ltp ? Number(candle.ltp) : null)
+              });
+            }
+          }
+        }
+      }
+      
+      latestEmaHistoryRows = rows;
+      renderEmaHistoryTable();
+    } catch (e) {
+      const tbody = document.querySelector('#ema-history-table tbody');
+      if (tbody) tbody.innerHTML = `<tr><td colspan="7" class="muted">${escapeHtml(e.message)}</td></tr>`;
+    }
+    
+    // Polling management: if EMA History view visible, ensure interval running
+    try { clearInterval(emaHistoryInterval); } catch (err) {}
+    if (document.getElementById('view-ema-history').style.display === 'block') {
+      emaHistoryInterval = setInterval(fetchEmaHistory, 10000);
+    }
+  }
+
+  // Attach sorting to EMA History table
+  attachSortingFor('ema-history-table', sortStateEmaHistory, renderEmaHistoryTable);
+
+  // Filter event listener
+  const emaFilterInput = document.getElementById('ema-filter-symbol');
+  if (emaFilterInput) {
+    emaFilterInput.addEventListener('keyup', renderEmaHistoryTable);
+  }
+
+  // Refresh button
+  const btnRefreshEmaHistory = document.getElementById('btn-refresh-ema-history');
+  if (btnRefreshEmaHistory) {
+    btnRefreshEmaHistory.addEventListener('click', fetchEmaHistory);
+  }
 
   // Active Orderbook sorting
   let sortStateActiveOrders = { key: 'symbol', dir: 'asc' };

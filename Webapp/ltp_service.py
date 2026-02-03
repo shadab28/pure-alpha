@@ -457,14 +457,19 @@ def _refresh_daily_averages_if_needed(symbols: List[str]):
             # Fetch recent daily closes per requested symbol (newest first, up to 500 candles)
             cur.execute(
                 """
-                SELECT stockname, array_agg(close ORDER BY candle_stock DESC LIMIT 500) AS closes
-                FROM ohlcv_data
-                WHERE timeframe='1d' AND stockname = ANY(%s)
+                SELECT stockname, array_agg(close ORDER BY candle_stock DESC) AS closes
+                FROM (
+                    SELECT stockname, close, candle_stock
+                    FROM ohlcv_data
+                    WHERE timeframe='1d' AND stockname = ANY(%s)
+                    ORDER BY stockname, candle_stock DESC
+                ) subq
                 GROUP BY stockname
                 """,
                 (symbols,)
             )
             rows = cur.fetchall()
+            logging.info(f"[EMA REFRESH] Fetched daily data for {len(rows)} symbols out of {len(symbols)} requested")
 
         periods = [5, 8, 10, 20, 50, 100, 200]
         with _daily_avg_lock:
@@ -479,7 +484,10 @@ def _refresh_daily_averages_if_needed(symbols: List[str]):
                             'ema50': None, 'ema100': None, 'ema200': None, 'updated': now
                         }
                         continue
+                    # Limit to last 500 candles (already sorted newest-first from DB)
+                    closes_raw = closes_raw[:500]
                     # convert to floats and reverse to chronological order (oldest first)
+                    # Handle Decimal objects from PostgreSQL
                     closes = [float(x) for x in closes_raw]
                     closes = list(reversed(closes))
                     
@@ -1389,8 +1397,21 @@ def get_ck_data() -> Dict[str, Any]:
     # Best-effort refresh of daily averages (EMAs)
     try:
         _refresh_daily_averages_if_needed(list(data.keys()))
-    except Exception:
-        pass
+    except Exception as e:
+        logging.warning("Failed to refresh daily averages: %s", e)
+    
+    # Check if we have any daily EMA data; if not, log a warning for debugging
+    with _daily_avg_lock:
+        daily_avg_snapshot = dict(_daily_avg_cache)
+    
+    # Count how many symbols have EMAs
+    symbols_with_ema = sum(1 for v in daily_avg_snapshot.values() if v.get('ema5') is not None)
+    symbols_without_ema = len(daily_avg_snapshot) - symbols_with_ema
+    
+    if symbols_without_ema > 0:
+        logging.warning(f"[EMA STATUS] {symbols_with_ema} symbols have EMA data, {symbols_without_ema} symbols missing. "
+                       f"If missing, run: python3 Core_files/download_daily_2y_to_db.py")
+    
     for sym, info in data.items():
         last_price = info.get('last_price')
         rsi = _rsi15m_cache.get(sym)
@@ -1631,5 +1652,99 @@ def manual_refresh_all_averages(symbols: Optional[List[str]] = None) -> Dict[str
             "error": str(e),
         }
 
+
+def get_ema_history() -> Dict[str, Any]:
+    """Return historical EMA values for 15-minute candles.
+    
+    Fetches the most recent 15-minute OHLCV data for all tracked symbols
+    and returns EMA 20, 50, 100, 200 values along with LTP.
+    
+    Response format:
+    {
+        "data": [
+            {
+                "timestamp": "2026-02-02 14:30:00",
+                "symbol": "INFY",
+                "ema_20": 1234.56,
+                "ema_50": 1234.00,
+                "ema_100": 1233.50,
+                "ema_200": 1232.00,
+                "ltp": 1235.00
+            },
+            ...
+        ]
+    }
+    """
+    try:
+        if not pg_cursor:
+            return {"data": [], "error": "Database not available"}
+        
+        with pg_cursor() as (cur, conn):
+            # Get list of all tracked symbols
+            cur.execute("""
+                SELECT DISTINCT symbol FROM ohlcv_data
+                ORDER BY symbol
+            """)
+            symbols = [row[0] for row in cur.fetchall()]
+            
+            rows = []
+            
+            for symbol in symbols:
+                try:
+                    # Get the latest 15-minute candles with EMA values
+                    # We'll fetch recent candles to show the EMA history
+                    cur.execute("""
+                        SELECT 
+                            timestamp,
+                            ema_20,
+                            ema_50,
+                            ema_100,
+                            ema_200,
+                            close
+                        FROM ohlcv_data
+                        WHERE symbol = %s 
+                            AND timeframe = '15m'
+                        ORDER BY timestamp DESC
+                        LIMIT 20
+                    """, (symbol,))
+                    
+                    candles = cur.fetchall()
+                    
+                    # Add rows for each candle
+                    for candle in reversed(candles):  # Reverse to show oldest first
+                        timestamp = candle[0]
+                        ema_20 = candle[1]
+                        ema_50 = candle[2]
+                        ema_100 = candle[3]
+                        ema_200 = candle[4]
+                        close = candle[5]
+                        
+                        # Format timestamp
+                        if timestamp:
+                            if hasattr(timestamp, 'isoformat'):
+                                ts_str = timestamp.strftime('%Y-%m-%d %H:%M:%S')
+                            else:
+                                ts_str = str(timestamp)
+                        else:
+                            ts_str = ''
+                        
+                        rows.append({
+                            "timestamp": ts_str,
+                            "symbol": symbol,
+                            "ema_20": float(ema_20) if ema_20 is not None else None,
+                            "ema_50": float(ema_50) if ema_50 is not None else None,
+                            "ema_100": float(ema_100) if ema_100 is not None else None,
+                            "ema_200": float(ema_200) if ema_200 is not None else None,
+                            "ltp": float(close) if close is not None else None,
+                        })
+                except Exception as e:
+                    logger.warning(f"Failed to fetch EMA history for {symbol}: {e}")
+                    continue
+            
+            return {"data": rows}
+            
+    except Exception as e:
+        logger.exception("get_ema_history failed: %s", e)
+        return {"error": str(e)}
 
 

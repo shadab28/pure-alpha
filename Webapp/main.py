@@ -546,6 +546,14 @@ def run(
     
     # Start scanner worker
     scanner_thread = run_scanners_periodic(scanner_interval)
+
+    # Trigger an immediate computation of daily EMAs so values appear in UI
+    try:
+        if hasattr(ltp_service, 'manual_refresh_all_averages'):
+            ltp_service.manual_refresh_all_averages()
+            logging.info("Initial daily averages (EMAs) computed")
+    except Exception as e:
+        logging.warning("Initial averages compute failed: %s", e)
     
     # -------------------------------------------------------------------
     # KiteTicker callbacks

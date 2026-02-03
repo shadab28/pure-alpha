@@ -243,19 +243,27 @@ def _start_timer():
 @app.after_request
 def _log_request(response):
 	try:
-		start = getattr(request, '_start_time', None)
-		latency = None
-		if start:
-			latency = round((time.time() - start) * 1000)  # ms
-		access_logger.info(
-			"%s %s %s %s %sms %s",
-			request.remote_addr or '-',
-			request.method,
-			request.path,
-			response.status_code,
-			latency if latency is not None else '-',
-			request.user_agent.string if hasattr(request, 'user_agent') else '-' 
-		)
+		# Skip logging unnecessary requests to reduce noise
+		skip_paths = {
+			'/api/ltp',
+			'/api/user-support',
+			'/api/major-support',
+			'/api/strategy/momentum/status',
+		}
+		
+		if request.path not in skip_paths:
+			start = getattr(request, '_start_time', None)
+			latency = None
+			if start:
+				latency = round((time.time() - start) * 1000)  # ms
+			access_logger.info(
+				"%s %s %s %s %sms",
+				request.remote_addr or '-',
+				request.method,
+				request.path,
+				response.status_code,
+				latency if latency is not None else '-'
+			)
 	except Exception as e:
 		# Don't crash the request on logging errors
 		error_logger.exception("Failed to log access: %s", e)
@@ -525,6 +533,37 @@ def api_vcp():
 		return jsonify(res)
 	except Exception as e:
 		error_logger.exception("/api/vcp failed: %s", e)
+		return jsonify({"error": str(e)}), 500
+
+@app.route('/api/ema-history')
+def api_ema_history():
+	"""Return historical EMA values for 15-minute candles.
+	
+	Returns recent 15-minute candles with EMA 20, 50, 100, 200 values.
+	Response format:
+	{
+		"data": [
+			{
+				"timestamp": "2026-02-02 14:30:00",
+				"symbol": "INFY",
+				"ema_20": 1234.56,
+				"ema_50": 1234.00,
+				"ema_100": 1233.50,
+				"ema_200": 1232.00,
+				"ltp": 1235.00
+			},
+			...
+		]
+	}
+	"""
+	try:
+		from ltp_service import get_ema_history  # type: ignore
+		res = get_ema_history()
+		if 'error' in res:
+			return jsonify({"error": res.get('error')}), 500
+		return jsonify(res)
+	except Exception as e:
+		error_logger.exception("/api/ema-history failed: %s", e)
 		return jsonify({"error": str(e)}), 500
 
 @app.route('/api/refresh/averages', methods=['POST'])

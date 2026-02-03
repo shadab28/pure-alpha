@@ -3,6 +3,7 @@
 
 Script behavior:
 - Loads `Core_files/token.txt` for access_token and api_key.
+
 - Reads `Support Files/param.yaml` for `universe_list` and `timeframe`.
 - Loads universe symbols from `Support Files/NiftySymbol.py`.
 - Uses KiteConnect.historical_data to fetch candles for each symbol's instrument_token.
