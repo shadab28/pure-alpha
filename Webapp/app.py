@@ -510,6 +510,23 @@ def api_ck():
 		error_logger.exception("/api/ck failed: %s", e)
 		return jsonify({"error": str(e)}), 500
 
+@app.route('/api/futures')
+def api_futures():
+	"""Return Futures dashboard data (front futures contracts till one day before expiry).
+
+	Uses ltp_service.get_futures_data() which returns RSI and technical indicators for futures.
+	Similar to CK tab but for futures instruments instead of stocks.
+	"""
+	try:
+		from ltp_service import get_futures_data  # type: ignore
+		res = get_futures_data()
+		if 'error' in res:
+			return jsonify({"error": res.get('error')}), 500
+		return jsonify(res)
+	except Exception as e:
+		error_logger.exception("/api/futures failed: %s", e)
+		return jsonify({"error": str(e)}), 500
+
 @app.route('/api/vcp')
 def api_vcp():
 	"""Return VCP (Volatility Contraction Pattern) breakout analysis.

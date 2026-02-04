@@ -1748,3 +1748,128 @@ def get_ema_history() -> Dict[str, Any]:
         return {"error": str(e)}
 
 
+def get_futures_data() -> Dict[str, Any]:
+    """Return Futures dashboard data: symbol -> { last_price, rsi_15m, signal, action }.
+    
+    Filters for front futures contracts (till one day before expiry).
+    Similar to CK but for futures instead of stocks.
+    Uses Kite API to identify futures and fetch their LTP and technical indicators.
+    """
+    try:
+        kite = get_kite()
+        
+        # Get instruments to identify futures
+        try:
+            instruments_data = kite.instruments()
+            if not instruments_data:
+                return {"data": {}, "info": "No instruments available"}
+        except Exception as e:
+            logger.warning(f"Failed to fetch instruments for futures: {e}")
+            instruments_data = []
+        
+        # Filter for front futures contracts (expires tomorrow or later, but before expiry)
+        from datetime import datetime, timedelta
+        today = datetime.now().date()
+        tomorrow = today + timedelta(days=1)
+        
+        futures_contracts = {}
+        
+        for inst in instruments_data:
+            if inst.get('segment') != 'NFO':
+                continue
+            
+            instrument_type = inst.get('instrument_type', '').upper()
+            if instrument_type != 'FUT':
+                continue
+            
+            # Skip weekly and monthly futures - we want the front month
+            tradingsymbol = inst.get('tradingsymbol', '')
+            
+            # Parse expiry date
+            try:
+                expiry_str = inst.get('expiry')
+                if expiry_str:
+                    expiry_date = datetime.strptime(expiry_str, '%Y-%m-%d').date()
+                    
+                    # Include if expiry is tomorrow or later (but not too far)
+                    if expiry_date >= tomorrow:
+                        # Group by base symbol (e.g., NIFTY, BANKNIFTY) and keep front contract
+                        base_symbol = tradingsymbol.split('-')[0] if '-' in tradingsymbol else tradingsymbol
+                        
+                        # Keep only if this is a new contract or closer to expiry than current
+                        if base_symbol not in futures_contracts or expiry_date < futures_contracts[base_symbol]['expiry']:
+                            futures_contracts[base_symbol] = {
+                                'tradingsymbol': tradingsymbol,
+                                'expiry': expiry_date,
+                                'token': inst.get('instrument_token')
+                            }
+            except Exception as e:
+                logger.debug(f"Failed to parse expiry for {tradingsymbol}: {e}")
+                continue
+        
+        if not futures_contracts:
+            return {"data": {}, "info": "No active futures contracts found"}
+        
+        # Fetch LTP for all future contracts
+        ltp_resp = fetch_ltp()
+        ltp_data = ltp_resp.get('data', {})
+        
+        out = {}
+        for base_symbol, contract_info in futures_contracts.items():
+            tradingsymbol = contract_info['tradingsymbol']
+            
+            # Get LTP for this futures contract
+            if tradingsymbol not in ltp_data:
+                continue
+            
+            info = ltp_data[tradingsymbol]
+            last_price = info.get('last_price')
+            rsi = _rsi15m_cache.get(tradingsymbol)
+            
+            # Strategy heuristics (similar to CK):
+            sma50_15m = info.get('sma50_15m')
+            sma200_15m = info.get('sma200_15m')
+            pct_vs_15m = info.get('pct_vs_15m_sma50')
+            
+            signal = 'Neutral'
+            action = 'Hold'
+            
+            try:
+                bullish_15m = (
+                    isinstance(sma50_15m, (int, float))
+                    and isinstance(sma200_15m, (int, float))
+                    and sma50_15m > sma200_15m
+                )
+                
+                if bullish_15m:
+                    signal = 'Bullish'
+                    if isinstance(pct_vs_15m, (int, float)) and pct_vs_15m < 0:
+                        action = 'Accumulate on pullback'
+                    else:
+                        action = 'Trade / Add on strength'
+                else:
+                    signal = 'Bearish'
+                    action = 'Wait for setup'
+            except Exception as e:
+                logger.debug(f"Signal calculation error for {tradingsymbol}: {e}")
+            
+            out[base_symbol] = {
+                'symbol': tradingsymbol,
+                'last_price': last_price,
+                'rsi_15m': rsi,
+                'sma50_15m': sma50_15m,
+                'sma200_15m': sma200_15m,
+                'pct_vs_15m_sma50': pct_vs_15m,
+                'signal': signal,
+                'action': action,
+                'expiry': contract_info['expiry'].isoformat()
+            }
+        
+        return {"data": out}
+    
+    except Exception as e:
+        logger.exception("get_futures_data failed: %s", e)
+        return {"error": str(e)}
+
+
+

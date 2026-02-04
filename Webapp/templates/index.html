@@ -62,6 +62,7 @@
   <button id="tab-main" class="btn secondary">All</button>
   <button id="tab-filtered" class="btn secondary">Filtered</button>
     <button id="tab-ck" class="btn secondary">CK</button>
+    <button id="tab-futures" class="btn secondary">Futures</button>
   <button id="tab-vcp" class="btn secondary">VCP</button>
   <button id="tab-ema-history" class="btn secondary">EMA History (15m)</button>
   <button id="tab-orders" class="btn secondary">Orders</button>
@@ -319,6 +320,70 @@
           </div>
         </div>
       </div>
+
+    <!-- Futures view -->
+    <div id="view-futures" class="card" style="display:none; margin-top:14px;">
+      <div class="card-header">Futures - Front Contracts RSI (15m)</div>
+      <div class="card-body">
+        <!-- Sub-tabs for Futures (similar to CK) -->
+        <div class="btn-row" style="margin-bottom:12px;">
+          <button id="futures-subtab-momentum" class="btn small active">Momentum</button>
+          <button id="futures-subtab-reversals" class="btn small secondary">Reversals at Levels</button>
+          <button id="futures-subtab-strategy" class="btn small secondary">Strategy</button>
+        </div>
+
+        <!-- Futures Momentum sub-view -->
+        <div id="futures-view-momentum">
+          <table id="futures-table-momentum">
+            <thead>
+              <tr>
+                <th data-key="symbol">Symbol (Front Contract)</th>
+                <th data-key="expiry">Expiry</th>
+                <th data-key="last_price">Last Price</th>
+                <th data-key="rsi_15m">RSI (15m)</th>
+                <th data-key="sma50_15m">SMA50 (15m)</th>
+                <th data-key="sma200_15m">SMA200 (15m)</th>
+                <th data-key="pct_vs_15m_sma50">% vs SMA50</th>
+                <th data-key="signal">Signal</th>
+                <th data-key="action">Action</th>
+                <th>Buy + SL 5% (₹10k)</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+
+        <!-- Futures Reversals sub-view -->
+        <div id="futures-view-reversals" style="display:none;">
+          <table id="futures-table-reversals">
+            <thead>
+              <tr>
+                <th data-key="symbol">Symbol (Front Contract)</th>
+                <th data-key="expiry">Expiry</th>
+                <th data-key="last_price">Last Price</th>
+                <th data-key="rsi_15m">RSI (15m)</th>
+                <th data-key="sma50_15m">SMA50 (15m)</th>
+                <th data-key="sma200_15m">SMA200 (15m)</th>
+                <th data-key="signal">Signal</th>
+                <th data-key="action">Action</th>
+                <th>Buy + SL 5% (₹10k)</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+
+        <!-- Futures Strategy sub-view (inherits from CK strategy panel) -->
+        <div id="futures-view-strategy" style="display:none;">
+          <div style="padding:12px; background:#f0fdf4; border-radius:8px; border:1px solid #bbf7d0; margin-bottom:16px;">
+            <div style="font-size:13px; color:#15803d;">
+              <strong>Note:</strong> Futures trading shares the same Momentum Strategy as the main CK tab. 
+              The futures tab displays front contracts with technical analysis only.
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
 
     <!-- VCP view -->
     <div id="view-vcp" class="card" style="display:none; margin-top:14px;">
@@ -934,6 +999,7 @@
       const tabOrders = document.getElementById('tab-orders');
       const tabActive = document.getElementById('tab-active');
       const tabCK = document.getElementById('tab-ck');
+      const tabFutures = document.getElementById('tab-futures');
       const tabVCP = document.getElementById('tab-vcp');
       const tabEmaHistory = document.getElementById('tab-ema-history');
       const tabTrades = document.getElementById('tab-trades');
@@ -941,11 +1007,11 @@
       // Generic helper: show one view and highlight its tab with .active
       function setSelectedTab(tabEl, viewId){
         // hide all views
-        ['view-main','view-filtered','view-orders','view-active','view-ck','view-vcp','view-ema-history','view-trades'].forEach(id=>{
+        ['view-main','view-filtered','view-orders','view-active','view-ck','view-futures','view-vcp','view-ema-history','view-trades'].forEach(id=>{
           const v = document.getElementById(id); if (v) v.style.display = 'none';
         });
         // normalize classes: set all tabs to exactly 'btn secondary' (remove active)
-        [tabMain, tabFiltered, tabOrders, tabActive, tabCK, tabVCP, tabEmaHistory, tabTrades].forEach(t=>{
+        [tabMain, tabFiltered, tabOrders, tabActive, tabCK, tabFutures, tabVCP, tabEmaHistory, tabTrades].forEach(t=>{
           if (!t) return;
           t.classList.remove('active');
           t.classList.remove('secondary');
@@ -966,6 +1032,7 @@
       tabOrders.addEventListener('click', ()=> { setSelectedTab(tabOrders, 'view-orders'); fetchOrders(); });
       if (tabActive) tabActive.addEventListener('click', ()=> { setSelectedTab(tabActive, 'view-active'); fetchActiveOrderbook(); });
   if (tabCK) tabCK.addEventListener('click', ()=> { setSelectedTab(tabCK, 'view-ck'); fetchCK(); });
+  if (tabFutures) tabFutures.addEventListener('click', ()=> { setSelectedTab(tabFutures, 'view-futures'); fetchFutures(); });
   if (tabVCP) tabVCP.addEventListener('click', ()=> { setSelectedTab(tabVCP, 'view-vcp'); fetchVCP(); });
   if (tabEmaHistory) tabEmaHistory.addEventListener('click', ()=> { setSelectedTab(tabEmaHistory, 'view-ema-history'); fetchEmaHistory(); });
   if (tabTrades) tabTrades.addEventListener('click', ()=> { setSelectedTab(tabTrades, 'view-trades'); fetchTrades(); });
@@ -1015,6 +1082,40 @@
   if (ckSubtabReversals) ckSubtabReversals.addEventListener('click', () => setCKSubtab('reversals'));
   if (ckSubtabAverages) ckSubtabAverages.addEventListener('click', () => setCKSubtab('averages'));
   if (ckSubtabStrategy) ckSubtabStrategy.addEventListener('click', () => setCKSubtab('strategy'));
+
+  // Futures Sub-tabs logic
+  let futuresActiveSubtab = 'momentum';
+  const futuresSubtabMomentum = document.getElementById('futures-subtab-momentum');
+  const futuresSubtabReversals = document.getElementById('futures-subtab-reversals');
+  const futuresSubtabStrategy = document.getElementById('futures-subtab-strategy');
+
+  function setFuturesSubtab(subtab) {
+    futuresActiveSubtab = subtab;
+    // Hide all Futures views first
+    document.getElementById('futures-view-momentum').style.display = 'none';
+    document.getElementById('futures-view-reversals').style.display = 'none';
+    document.getElementById('futures-view-strategy').style.display = 'none';
+    // Reset all sub-tab button styles
+    futuresSubtabMomentum.classList.remove('active'); futuresSubtabMomentum.classList.add('secondary');
+    futuresSubtabReversals.classList.remove('active'); futuresSubtabReversals.classList.add('secondary');
+    if (futuresSubtabStrategy) { futuresSubtabStrategy.classList.remove('active'); futuresSubtabStrategy.classList.add('secondary'); }
+    // Show selected view and highlight its button
+    if (subtab === 'momentum') {
+      futuresSubtabMomentum.classList.remove('secondary'); futuresSubtabMomentum.classList.add('active');
+      document.getElementById('futures-view-momentum').style.display = 'block';
+    } else if (subtab === 'reversals') {
+      futuresSubtabReversals.classList.remove('secondary'); futuresSubtabReversals.classList.add('active');
+      document.getElementById('futures-view-reversals').style.display = 'block';
+    } else if (subtab === 'strategy') {
+      futuresSubtabStrategy.classList.remove('secondary'); futuresSubtabStrategy.classList.add('active');
+      document.getElementById('futures-view-strategy').style.display = 'block';
+    }
+    renderFuturesTables();
+  }
+
+  if (futuresSubtabMomentum) futuresSubtabMomentum.addEventListener('click', () => setFuturesSubtab('momentum'));
+  if (futuresSubtabReversals) futuresSubtabReversals.addEventListener('click', () => setFuturesSubtab('reversals'));
+  if (futuresSubtabStrategy) futuresSubtabStrategy.addEventListener('click', () => setFuturesSubtab('strategy'));
 
   let ckInterval = null;
   let latestCKRows = [];
@@ -1175,6 +1276,87 @@
   attachSortingFor('ck-table-reversals', sortStateCKReversals, renderCKTables);
   // attach sorting for averages table
   attachSortingFor('ck-table-averages', sortStateCKAverages, renderCKTables);
+
+  // Futures Tab Logic
+  let futuresInterval = null;
+  let latestFuturesRows = [];
+  let sortStateFuturesMomentum = { key: 'last_price', dir: 'desc' };
+  let sortStateFuturesReversals = { key: 'last_price', dir: 'asc' };
+
+  function renderFuturesRowHtml(r) {
+    const buyDisabled = (typeof r.last_price === 'number') ? '' : 'disabled';
+    return `<td>${escapeHtml(r.symbol)}</td><td>${r.expiry || ''}</td><td>${r.last_price!=null? r.last_price.toFixed(2): ''}</td><td>${r.rsi_15m!=null? r.rsi_15m.toFixed(2): ''}</td><td>${r.sma50_15m!=null? r.sma50_15m.toFixed(2): ''}</td><td>${r.sma200_15m!=null? r.sma200_15m.toFixed(2): ''}</td><td>${r.pct_vs_15m_sma50!=null? r.pct_vs_15m_sma50.toFixed(2)+'%': ''}</td><td>${escapeHtml(r.signal||'')}</td><td>${escapeHtml(r.action||'')}</td><td><button class="btn small" onclick="placeBuy('${escapeHtml(r.symbol)}', this)" ${buyDisabled}>Buy</button></td>`;
+  }
+
+  function renderFuturesTables(){
+    // Momentum table
+    const momentumRows = latestFuturesRows.filter(r => {
+      return (r.signal && (r.signal.includes('Bull') || r.signal === 'Neutral'));
+    });
+    applySort(momentumRows, sortStateFuturesMomentum);
+    const tbodyMomentum = document.querySelector('#futures-table-momentum tbody');
+    if (tbodyMomentum) {
+      tbodyMomentum.innerHTML = '';
+      for (const r of momentumRows){
+        const tr = document.createElement('tr');
+        tr.innerHTML = renderFuturesRowHtml(r);
+        tbodyMomentum.appendChild(tr);
+      }
+    }
+
+    // Reversals table
+    const reversalsRows = latestFuturesRows.filter(r => {
+      return (r.rsi_15m != null && (r.rsi_15m < 30 || r.rsi_15m > 70));
+    });
+    applySort(reversalsRows, sortStateFuturesReversals);
+    const tbodyReversals = document.querySelector('#futures-table-reversals tbody');
+    if (tbodyReversals) {
+      tbodyReversals.innerHTML = '';
+      for (const r of reversalsRows){
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td>${escapeHtml(r.symbol)}</td><td>${r.expiry || ''}</td><td>${r.last_price!=null? r.last_price.toFixed(2): ''}</td><td>${r.rsi_15m!=null? r.rsi_15m.toFixed(2): ''}</td><td>${r.sma50_15m!=null? r.sma50_15m.toFixed(2): ''}</td><td>${r.sma200_15m!=null? r.sma200_15m.toFixed(2): ''}</td><td>${escapeHtml(r.signal||'')}</td><td>${escapeHtml(r.action||'')}</td><td><button class="btn small" onclick="placeBuy('${escapeHtml(r.symbol)}', this)">Buy</button></td>`;
+        tbodyReversals.appendChild(tr);
+      }
+    }
+  }
+
+  async function fetchFutures(){
+    try{
+      const res = await fetch('/api/futures');
+      const j = await res.json();
+      if (!res.ok) throw new Error(j.error || 'Failed to fetch Futures');
+      const data = j.data || {};
+      const syms = Object.keys(data).sort();
+      
+      latestFuturesRows = syms.map(s=>{
+        const info = data[s] || {};
+        return {
+          symbol: escapeHtml(info.symbol || s),
+          expiry: info.expiry || '',
+          last_price: (typeof info.last_price==='number')? info.last_price : (info.last_price? Number(info.last_price): null),
+          rsi_15m: (typeof info.rsi_15m==='number')? info.rsi_15m : (info.rsi_15m? Number(info.rsi_15m): null),
+          sma50_15m: (typeof info.sma50_15m==='number')? info.sma50_15m : (info.sma50_15m? Number(info.sma50_15m): null),
+          sma200_15m: (typeof info.sma200_15m==='number')? info.sma200_15m : (info.sma200_15m? Number(info.sma200_15m): null),
+          pct_vs_15m_sma50: (typeof info.pct_vs_15m_sma50==='number')? info.pct_vs_15m_sma50 : (info.pct_vs_15m_sma50? Number(info.pct_vs_15m_sma50): null),
+          signal: info.signal || '',
+          action: info.action || ''
+        };
+      });
+      renderFuturesTables();
+    }catch(e){
+      const tbodyM = document.querySelector('#futures-table-momentum tbody'); 
+      const tbodyR = document.querySelector('#futures-table-reversals tbody'); 
+      if (tbodyM) tbodyM.innerHTML = `<tr><td colspan="10" class="muted">${escapeHtml(e.message)}</td></tr>`;
+      if (tbodyR) tbodyR.innerHTML = `<tr><td colspan="9" class="muted">${escapeHtml(e.message)}</td></tr>`;
+    }
+    // polling management
+    try{ clearInterval(futuresInterval); }catch(e){}
+    if (document.getElementById('view-futures') && document.getElementById('view-futures').style.display==='block') futuresInterval = setInterval(fetchFutures, 10000);
+  }
+
+  // Attach sorting to Futures tables
+  attachSortingFor('futures-table-momentum', sortStateFuturesMomentum, renderFuturesTables);
+  attachSortingFor('futures-table-reversals', sortStateFuturesReversals, renderFuturesTables);
 
   // VCP Tab Logic
   let vcpInterval = null;
